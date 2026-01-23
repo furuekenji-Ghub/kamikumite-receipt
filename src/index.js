@@ -7,198 +7,357 @@ export default {
     const pathname = url.pathname;
 
     try {
-      // =========================
-      // ADMIN API (Access)
-      // =========================
-      if (pathname.startsWith("/api/admin/receipt/")) {
-        // version
-        if (pathname === "/api/admin/receipt/_version" && request.method === "GET") {
-          return json({ ok: true, worker: "kamikumite-receipt", build: "CSV_IMPORT_v1+PDFGEN_v1" });
+      // =========================================================
+      // MEMBER UI (English only)
+      // Route: kamikumite.worlddivinelight.org/receipt*
+      // =========================================================
+      if (host === "kamikumite.worlddivinelight.org" && pathname.startsWith("/receipt")) {
+        return new Response(memberPortalHtml(env), {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+        });
+      }
+
+      // =========================================================
+      // MEMBER API (OTP + me + pdf)
+      // Route: api.kamikumite.worlddivinelight.org/api/receipt/*
+      // =========================================================
+      if (host === "api.kamikumite.worlddivinelight.org" && pathname.startsWith("/api/receipt/")) {
+        const allowOrigin = env.PORTAL_ORIGIN || "https://kamikumite.worlddivinelight.org";
+        const origin = request.headers.get("Origin") || "";
+
+        if (request.method === "OPTIONS") {
+          return new Response(null, { status: 204, headers: corsHeaders(allowOrigin, origin) });
         }
 
-        // ---------- TEMPLATE CONFIG ----------
-        if (pathname === "/api/admin/receipt/template/config" && request.method === "GET") {
-          const cfg = await getTemplateConfig(env);
-          return json({ ok: true, config: cfg });
-        }
+        // POST /api/receipt/request-code
+        if (pathname === "/api/receipt/request-code" && request.method === "POST") {
+          if (!env.OTP_KV) return jsonC({ ok: false, error: "kv_not_bound" }, 501, allowOrigin, origin);
 
-        if (pathname === "/api/admin/receipt/template/config" && request.method === "POST") {
           const body = await request.json().catch(() => null);
-          if (!body) return json({ ok: false, error: "invalid_json" }, 400);
+          const email = normEmail(body?.email);
+          if (!email) return jsonC({ ok: false, error: "email_required" }, 400, allowOrigin, origin);
 
-          const cur = await getTemplateConfig(env);
-          const next = {
-            page: intOr(cur.page, body.page),
-            name_x: numOr(cur.name_x, body.name_x),
-            name_y: numOr(cur.name_y, body.name_y),
-            year_x: numOr(cur.year_x, body.year_x),
-            year_y: numOr(cur.year_y, body.year_y),
-            amount_x: numOr(cur.amount_x, body.amount_x),
-            amount_y: numOr(cur.amount_y, body.amount_y),
-            date_x: numOr(cur.date_x, body.date_x),
-            date_y: numOr(cur.date_y, body.date_y),
-            font_size: numOr(cur.font_size, body.font_size),
-          };
+          // rate limit 60s
+          const rlKey = `rl:${email}`;
+          const rl = await env.OTP_KV.get(rlKey, "json");
+          const now = Date.now();
+          const last = Number(rl?.lastSendTs || 0);
+          if (now - last < 60_000) return jsonC({ ok: false, error: "rate_limited" }, 429, allowOrigin, origin);
 
-          await upsertTemplateConfig(env, next);
-          return json({ ok: true, config: next });
+          // eligibility by email
+          const hs = await hubspotGetContactByEmail(env, email, ["email","member_id","receipt_portal_eligible","receipt_years_available"]);
+          if (hs.status === 404) return jsonC({ ok: false, error: "not_registered" }, 404, allowOrigin, origin);
+          if (!hs.ok) return jsonC({ ok: false, error: "hubspot_get_failed", detail: await safeText(hs) }, hs.status, allowOrigin, origin);
+
+          const contact = await hs.json();
+          const p = contact.properties || {};
+          if (!toBool(p.receipt_portal_eligible)) return jsonC({ ok: false, error: "not_eligible" }, 403, allowOrigin, origin);
+
+          const memberId = String(p.member_id || "").trim();
+          const years = parseYears(String(p.receipt_years_available || "").trim());
+          if (!memberId) return jsonC({ ok: false, error: "member_id_missing" }, 403, allowOrigin, origin);
+          if (!years.length) return jsonC({ ok: false, error: "no_years" }, 403, allowOrigin, origin);
+
+          const code = String(Math.floor(100000 + Math.random() * 900000));
+          const secret = must(env.SESSION_SECRET || env.MAGICLINK_SECRET, "Missing SESSION_SECRET (or MAGICLINK_SECRET)");
+          const otpHash = await sha256Hex(`${code}:${secret}`);
+
+          await env.OTP_KV.put(`otp:${email}`, JSON.stringify({
+            otpHash, memberId, years, expiresAt: now + 10 * 60_000, attempts: 0
+          }), { expirationTtl: 10 * 60 });
+
+          await env.OTP_KV.put(rlKey, JSON.stringify({ lastSendTs: now }), { expirationTtl: 120 });
+
+          await sendResend(env, {
+            to: email,
+            subject: "Your verification code for the Receipt Portal",
+            html: otpEmailHtml({ code })
+          });
+
+          return jsonC({ ok: true, sent: true }, 200, allowOrigin, origin);
         }
 
-        // ---------- TEMPLATE TEST PDF ----------
-        if (pathname === "/api/admin/receipt/template/test.pdf" && request.method === "GET") {
-          const name = (url.searchParams.get("name") || "John Doe").trim();
-          const year = (url.searchParams.get("year") || String(new Date().getFullYear() - 1)).trim();
-          const amount = (url.searchParams.get("amount") || "0").trim();
-          const date = (url.searchParams.get("date") || new Date().toISOString().slice(0, 10)).trim();
-          return await renderTemplatePdf(env, { name, year, amount, date, inline: true });
-        }
+        // POST /api/receipt/verify-code
+        if (pathname === "/api/receipt/verify-code" && request.method === "POST") {
+          if (!env.OTP_KV) return jsonC({ ok: false, error: "kv_not_bound" }, 501, allowOrigin, origin);
 
-        // =========================
-        // CSV IMPORT (new)
-        // =========================
+          const body = await request.json().catch(() => null);
+          const email = normEmail(body?.email);
+          const code = String(body?.code || "").trim();
 
-        // POST /api/admin/receipt/import  (Content-Type: text/csv)
-        if (pathname === "/api/admin/receipt/import" && request.method === "POST") {
-          const contentType = request.headers.get("content-type") || "";
-          if (!contentType.includes("text/csv") && !contentType.includes("application/csv") && !contentType.includes("text/plain")) {
-            return json({ ok: false, error: "content_type_must_be_csv" }, 415);
-          }
-          if (!env.RECEIPTS_DB) return json({ ok: false, error: "D1_not_bound" }, 501);
-          if (!env.RECEIPTS_BUCKET) return json({ ok: false, error: "R2_not_bound" }, 501);
+          if (!email) return jsonC({ ok: false, error: "email_required" }, 400, allowOrigin, origin);
+          if (!/^\d{6}$/.test(code)) return jsonC({ ok: false, error: "code_invalid" }, 400, allowOrigin, origin);
 
-          const csvText = await request.text();
-          const rows = parseCsvRows(csvText);
-          if (rows.length === 0) return json({ ok: false, error: "no_rows" }, 400);
+          const record = await env.OTP_KV.get(`otp:${email}`, "json");
+          if (!record) return jsonC({ ok: false, error: "code_expired" }, 401, allowOrigin, origin);
 
-          const jobId = crypto.randomUUID();
-          const year = normalizeYear(rows[0].year) ?? (new Date().getFullYear() - 1);
+          const now = Date.now();
+          if (now > Number(record.expiresAt || 0)) return jsonC({ ok: false, error: "code_expired" }, 401, allowOrigin, origin);
 
-          await env.RECEIPTS_DB.prepare(`
-            INSERT INTO receipt_import_job (job_id, year, total_rows, processed_rows, ok_rows, ng_rows, next_index, status)
-            VALUES (?, ?, ?, 0, 0, 0, 0, 'READY')
-          `).bind(jobId, year, rows.length).run();
+          const attempts = Number(record.attempts || 0);
+          if (attempts >= 5) return jsonC({ ok: false, error: "too_many_attempts" }, 429, allowOrigin, origin);
 
-          await env.RECEIPTS_BUCKET.put(`uploads/${jobId}.csv`, csvText, { httpMetadata: { contentType: "text/csv" } });
-
-          return json({ ok: true, job_id: jobId, year, total_rows: rows.length });
-        }
-
-        // POST /api/admin/receipt/import/continue?job_id=...&batch=20
-        if (pathname === "/api/admin/receipt/import/continue" && request.method === "POST") {
-          const jobId = String(url.searchParams.get("job_id") || "").trim();
-          const batch = clampInt(url.searchParams.get("batch"), 1, 100, 20);
-          if (!jobId) return json({ ok: false, error: "job_id_required" }, 400);
-
-          const job = await getJob(env, jobId);
-          if (!job) return json({ ok: false, error: "job_not_found" }, 404);
-
-          const csvObj = await env.RECEIPTS_BUCKET.get(`uploads/${jobId}.csv`);
-          if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
-
-          const csvText = await csvObj.text();
-          const rows = parseCsvRows(csvText);
-
-          const start = job.next_index;
-          const end = Math.min(rows.length, start + batch);
-
-          await setJobStatus(env, jobId, "RUNNING", null);
-
-          let okCount = 0;
-          let ngCount = 0;
-
-          for (let i = start; i < end; i++) {
-            const r = rows[i];
-            const memberId = String(r.member_id || "").trim();
-            const branch = String(r.branch || "").trim();
-            const amountCents = parseAmountToCents(r.amount);
-            const year = normalizeYear(r.year) ?? job.year;
-
-            if (!memberId || !branch || amountCents === null) {
-              ngCount++;
-              await upsertAnnual(env, { year, member_id: memberId, branch, name: "(invalid)", amount_cents: 0, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "invalid_row" });
-              continue;
-            }
-
-            // HubSpot lookup by member_id (idProperty=member_id)
-            const hs = await hubspotGetContactByIdProperty(env, memberId, "member_id", ["firstname","lastname","email","member_id","receipt_years_available","receipt_portal_eligible"]);
-            if (hs.status === 404 || !hs.ok) {
-              ngCount++;
-              await upsertAnnual(env, { year, member_id: memberId, branch, name: "(hubspot not found)", amount_cents: amountCents, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "hubspot_not_found" });
-              continue;
-            }
-
-            const contact = await hs.json();
-            const p = contact.properties || {};
-            const name = formatName(p.firstname, p.lastname, p.email);
-
-            // Update HubSpot: eligible true + add year
-            const years = parseYears(String(p.receipt_years_available || "").trim());
-            if (!years.includes(String(year))) years.push(String(year));
-            const yearsStr = years.join(";");
-
-            const patch = await hubspotPatchContactByIdProperty(env, memberId, "member_id", {
-              receipt_portal_eligible: true,
-              receipt_years_available: yearsStr
-            });
-
-            if (!patch.ok) {
-              ngCount++;
-              await upsertAnnual(env, { year, member_id: memberId, branch, name, amount_cents: amountCents, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "hubspot_patch_failed" });
-              continue;
-            }
-
-            // Generate PDF and store to R2
-            const pdfKey = `receipts/${memberId}/${year}.pdf`;
-            const pdfBytes = await generateReceiptPdf(env, {
-              name,
-              year: String(year),
-              amount: formatUsd(amountCents),
-              date: todayISO()
-            });
-
-            await env.RECEIPTS_BUCKET.put(pdfKey, pdfBytes, { httpMetadata: { contentType: "application/pdf" } });
-
-            await upsertAnnual(env, { year, member_id: memberId, branch, name, amount_cents: amountCents, issue_date: todayISO(), pdf_key: pdfKey, status: "DONE", error: null });
-            okCount++;
+          const secret = must(env.SESSION_SECRET || env.MAGICLINK_SECRET, "Missing SESSION_SECRET (or MAGICLINK_SECRET)");
+          const otpHash = await sha256Hex(`${code}:${secret}`);
+          if (otpHash !== record.otpHash) {
+            record.attempts = attempts + 1;
+            await env.OTP_KV.put(`otp:${email}`, JSON.stringify(record), { expirationTtl: 10 * 60 });
+            return jsonC({ ok: false, error: "code_wrong" }, 401, allowOrigin, origin);
           }
 
-          const processed = end;
-          await env.RECEIPTS_DB.prepare(`
-            UPDATE receipt_import_job
-            SET processed_rows = ?, ok_rows = ok_rows + ?, ng_rows = ng_rows + ?, next_index = ?, updated_at = datetime('now'),
-                status = CASE WHEN ? >= total_rows THEN 'DONE' ELSE status END
-            WHERE job_id = ?
-          `).bind(processed, okCount, ngCount, end, end, jobId).run();
+          await env.OTP_KV.delete(`otp:${email}`);
 
-          const updated = await getJob(env, jobId);
-          return json({ ok: true, job: updated, batch: { start, end, ok: okCount, ng: ngCount }, done: updated.status === "DONE" });
+          const session = makeSession(env, { email, memberId: record.memberId });
+          const cookie = [
+            `receipt_session=${session}`,
+            "Path=/",
+            "Secure",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Domain=.worlddivinelight.org",
+            `Max-Age=${7 * 24 * 60 * 60}`,
+          ].join("; ");
+
+          return new Response(JSON.stringify({ ok: true, years: record.years || [] }), {
+            status: 200,
+            headers: {
+              ...corsHeaders(allowOrigin, origin),
+              "content-type": "application/json; charset=utf-8",
+              "cache-control": "no-store",
+              "set-cookie": cookie
+            }
+          });
         }
 
-        // GET /api/admin/receipt/import/status?job_id=...
-        if (pathname === "/api/admin/receipt/import/status" && request.method === "GET") {
-          const jobId = String(url.searchParams.get("job_id") || "").trim();
-          if (!jobId) return json({ ok: false, error: "job_id_required" }, 400);
-          const job = await getJob(env, jobId);
-          if (!job) return json({ ok: false, error: "job_not_found" }, 404);
-          return json({ ok: true, job });
+        // GET /api/receipt/me
+        if (pathname === "/api/receipt/me" && request.method === "GET") {
+          const sess = readCookie(request.headers.get("Cookie") || "", "receipt_session");
+          const s = verifySession(env, sess);
+          if (!s.ok) return jsonC({ ok: false, error: "not_logged_in" }, 401, allowOrigin, origin);
+
+          const hs = await hubspotGetContactByEmail(env, s.email, ["receipt_years_available"]);
+          if (!hs.ok) return jsonC({ ok: false, error: "hubspot_get_failed" }, 500, allowOrigin, origin);
+          const contact = await hs.json();
+          const years = parseYears(String(contact.properties?.receipt_years_available || "").trim());
+          return jsonC({ ok: true, years }, 200, allowOrigin, origin);
         }
 
-        // GET /api/admin/receipt/dashboard?year=2025
-        if (pathname === "/api/admin/receipt/dashboard" && request.method === "GET") {
-          const year = normalizeYear(url.searchParams.get("year")) ?? (new Date().getFullYear() - 1);
-          const rows = await env.RECEIPTS_DB.prepare(`
-            SELECT year, member_id, branch, name, amount_cents, issue_date, pdf_key, status, error
-            FROM receipt_annual
-            WHERE year = ?
-            ORDER BY branch ASC, name ASC
-          `).bind(year).all();
-          return json({ ok: true, year, rows: rows.results || [] });
+        // GET /api/receipt/pdf?year=2025
+        if (pathname === "/api/receipt/pdf" && request.method === "GET") {
+          const sess = readCookie(request.headers.get("Cookie") || "", "receipt_session");
+          const s = verifySession(env, sess);
+          if (!s.ok) return jsonC({ ok: false, error: "not_logged_in" }, 401, allowOrigin, origin);
+
+          const year = String(url.searchParams.get("year") || "").trim();
+          if (!/^\d{4}$/.test(year)) return jsonC({ ok: false, error: "invalid_year" }, 400, allowOrigin, origin);
+
+          const hs = await hubspotGetContactByEmail(env, s.email, ["member_id","receipt_years_available","receipt_portal_eligible"]);
+          if (!hs.ok) return jsonC({ ok: false, error: "hubspot_get_failed" }, 500, allowOrigin, origin);
+          const p = (await hs.json()).properties || {};
+
+          if (!toBool(p.receipt_portal_eligible)) return jsonC({ ok: false, error: "not_eligible" }, 403, allowOrigin, origin);
+
+          const memberId = String(p.member_id || "").trim();
+          const years = parseYears(String(p.receipt_years_available || "").trim());
+          if (!memberId || !years.includes(year)) return jsonC({ ok: false, error: "year_not_available" }, 403, allowOrigin, origin);
+
+          if (!env.RECEIPTS_BUCKET) return jsonC({ ok: false, error: "r2_not_bound" }, 501, allowOrigin, origin);
+
+          const key = `receipts/${memberId}/${year}.pdf`;
+          const obj = await env.RECEIPTS_BUCKET.get(key);
+          if (!obj) return jsonC({ ok: false, error: "pdf_not_found", key }, 404, allowOrigin, origin);
+
+          return new Response(obj.body, {
+            status: 200,
+            headers: {
+              ...corsHeaders(allowOrigin, origin),
+              "content-type": "application/pdf",
+              "cache-control": "no-store",
+              "content-disposition": `attachment; filename="receipt_${memberId}_${year}.pdf"`
+            }
+          });
         }
 
+        return jsonC({ ok: false, error: "not_found" }, 404, allowOrigin, origin);
+      }
+
+      // =========================================================
+      // ADMIN API (Access protected)
+      // =========================================================
+      if (!pathname.startsWith("/api/admin/receipt/")) {
         return json({ ok: false, error: "Not found" }, 404);
       }
 
+      // version
+      if (pathname === "/api/admin/receipt/_version" && request.method === "GET") {
+        return json({ ok: true, worker: "kamikumite-receipt", build: "CSV_IMPORT_v1+PDFGEN_v1+ADMIN_UI_v1" });
+      }
+
+      // ---- Admin PDF download (NEW) ----
+      // GET /api/admin/receipt/pdf?member_id=TEST-0001&year=2025
+      if (pathname === "/api/admin/receipt/pdf" && request.method === "GET") {
+        const memberId = String(url.searchParams.get("member_id") || "").trim();
+        const year = String(url.searchParams.get("year") || "").trim();
+        if (!memberId || !/^\d{4}$/.test(year)) return json({ ok: false, error: "member_id_and_year_required" }, 400);
+        if (!env.RECEIPTS_BUCKET) return json({ ok: false, error: "r2_not_bound" }, 501);
+
+        const key = `receipts/${memberId}/${year}.pdf`;
+        const obj = await env.RECEIPTS_BUCKET.get(key);
+        if (!obj) return json({ ok: false, error: "pdf_not_found", key }, 404);
+
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            "content-type": "application/pdf",
+            "cache-control": "no-store",
+            "content-disposition": `inline; filename="receipt_${memberId}_${year}.pdf"`
+          }
+        });
+      }
+
+      // ---- template config ----
+      if (pathname === "/api/admin/receipt/template/config" && request.method === "GET") {
+        const cfg = await getTemplateConfig(env);
+        return json({ ok: true, config: cfg });
+      }
+
+      if (pathname === "/api/admin/receipt/template/test.pdf" && request.method === "GET") {
+        const name = (url.searchParams.get("name") || "John Doe").trim();
+        const year = (url.searchParams.get("year") || String(new Date().getFullYear() - 1)).trim();
+        const amount = (url.searchParams.get("amount") || "0").trim();
+        const date = (url.searchParams.get("date") || new Date().toISOString().slice(0, 10)).trim();
+        return await renderTemplatePdf(env, { name, year, amount, date, inline: true });
+      }
+
+      // POST import (text/csv)
+      if (pathname === "/api/admin/receipt/import" && request.method === "POST") {
+        const contentType = request.headers.get("content-type") || "";
+        if (!contentType.includes("text/csv") && !contentType.includes("application/csv") && !contentType.includes("text/plain")) {
+          return json({ ok: false, error: "content_type_must_be_csv" }, 415);
+        }
+        if (!env.RECEIPTS_DB) return json({ ok: false, error: "D1_not_bound" }, 501);
+        if (!env.RECEIPTS_BUCKET) return json({ ok: false, error: "R2_not_bound" }, 501);
+
+        const csvText = await request.text();
+        const rows = parseCsvRows(csvText);
+        if (rows.length === 0) return json({ ok: false, error: "no_rows" }, 400);
+
+        const jobId = crypto.randomUUID();
+        const year = normalizeYear(rows[0].year) ?? (new Date().getFullYear() - 1);
+
+        await env.RECEIPTS_DB.prepare(`
+          INSERT INTO receipt_import_job (job_id, year, total_rows, processed_rows, ok_rows, ng_rows, next_index, status)
+          VALUES (?, ?, ?, 0, 0, 0, 0, 'READY')
+        `).bind(jobId, year, rows.length).run();
+
+        await env.RECEIPTS_BUCKET.put(`uploads/${jobId}.csv`, csvText, { httpMetadata: { contentType: "text/csv" } });
+
+        return json({ ok: true, job_id: jobId, year, total_rows: rows.length });
+      }
+
+      // POST continue
+      if (pathname === "/api/admin/receipt/import/continue" && request.method === "POST") {
+        const jobId = String(url.searchParams.get("job_id") || "").trim();
+        const batch = clampInt(url.searchParams.get("batch"), 1, 100, 20);
+        if (!jobId) return json({ ok: false, error: "job_id_required" }, 400);
+
+        const job = await getJob(env, jobId);
+        if (!job) return json({ ok: false, error: "job_not_found" }, 404);
+
+        const csvObj = await env.RECEIPTS_BUCKET.get(`uploads/${jobId}.csv`);
+        if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
+
+        const csvText = await csvObj.text();
+        const rows = parseCsvRows(csvText);
+
+        const start = job.next_index;
+        const end = Math.min(rows.length, start + batch);
+
+        await setJobStatus(env, jobId, "RUNNING", null);
+
+        let okCount = 0;
+        let ngCount = 0;
+
+        for (let i = start; i < end; i++) {
+          const r = rows[i];
+          const memberId = String(r.member_id || "").trim();
+          const branch = String(r.branch || "").trim();
+          const amountCents = parseAmountToCents(r.amount);
+          const year = normalizeYear(r.year) ?? job.year;
+
+          if (!memberId || !branch || amountCents === null) {
+            ngCount++;
+            await upsertAnnual(env, { year, member_id: memberId, branch, name: "(invalid)", amount_cents: 0, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "invalid_row" });
+            continue;
+          }
+
+          const hs = await hubspotGetContactByIdProperty(env, memberId, "member_id", ["firstname","lastname","email","member_id","receipt_years_available","receipt_portal_eligible"]);
+          if (hs.status === 404 || !hs.ok) {
+            ngCount++;
+            await upsertAnnual(env, { year, member_id: memberId, branch, name: "(hubspot not found)", amount_cents: amountCents, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "hubspot_not_found" });
+            continue;
+          }
+
+          const contact = await hs.json();
+          const p = contact.properties || {};
+          const name = formatName(p.firstname, p.lastname, p.email);
+
+          const years = parseYears(String(p.receipt_years_available || "").trim());
+          if (!years.includes(String(year))) years.push(String(year));
+          const yearsStr = years.join(";");
+
+          const patch = await hubspotPatchContactByIdProperty(env, memberId, "member_id", {
+            receipt_portal_eligible: true,
+            receipt_years_available: yearsStr
+          });
+
+          if (!patch.ok) {
+            ngCount++;
+            await upsertAnnual(env, { year, member_id: memberId, branch, name, amount_cents: amountCents, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "hubspot_patch_failed" });
+            continue;
+          }
+
+          const pdfKey = `receipts/${memberId}/${year}.pdf`;
+          const pdfBytes = await generateReceiptPdf(env, {
+            name,
+            year: String(year),
+            amount: formatUsd(amountCents),
+            date: todayISO()
+          });
+
+          await env.RECEIPTS_BUCKET.put(pdfKey, pdfBytes, { httpMetadata: { contentType: "application/pdf" } });
+
+          await upsertAnnual(env, { year, member_id: memberId, branch, name, amount_cents: amountCents, issue_date: todayISO(), pdf_key: pdfKey, status: "DONE", error: null });
+          okCount++;
+        }
+
+        const processed = end;
+        await env.RECEIPTS_DB.prepare(`
+          UPDATE receipt_import_job
+          SET processed_rows = ?, ok_rows = ok_rows + ?, ng_rows = ng_rows + ?, next_index = ?, updated_at = datetime('now'),
+              status = CASE WHEN ? >= total_rows THEN 'DONE' ELSE status END
+          WHERE job_id = ?
+        `).bind(processed, okCount, ngCount, end, end, jobId).run();
+
+        const updated = await getJob(env, jobId);
+        return json({ ok: true, job: updated, batch: { start, end, ok: okCount, ng: ngCount }, done: updated.status === "DONE" });
+      }
+
+      // dashboard
+      if (pathname === "/api/admin/receipt/dashboard" && request.method === "GET") {
+        const year = normalizeYear(url.searchParams.get("year")) ?? (new Date().getFullYear() - 1);
+        const rows = await env.RECEIPTS_DB.prepare(`
+          SELECT year, member_id, branch, name, amount_cents, issue_date, pdf_key, status, error
+          FROM receipt_annual
+          WHERE year = ?
+          ORDER BY branch ASC, name ASC
+        `).bind(year).all();
+        return json({ ok: true, year, rows: rows.results || [] });
+      }
+
       return json({ ok: false, error: "Not found" }, 404);
+
     } catch (e) {
       return json({ ok: false, error: "server_error", detail: String(e?.stack || e) }, 500);
     }
@@ -209,15 +368,13 @@ export default {
 async function renderTemplatePdf(env, { name, year, amount, date, inline }) {
   if (!env.RECEIPTS_BUCKET) return json({ ok: false, error: "R2_not_bound" }, 501);
   const obj = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
-  if (!obj) return json({ ok: false, error: "template_not_found", key: "templates/receipt_template_v1.pdf" }, 404);
+  if (!obj) return json({ ok: false, error: "template_not_found" }, 404);
 
   const cfg = await getTemplateConfig(env);
   const bytes = await obj.arrayBuffer();
-
   const pdf = await PDFDocument.load(bytes);
   const pages = pdf.getPages();
-  const pageIndex = Math.max(0, Math.min(cfg.page, pages.length - 1));
-  const page = pages[pageIndex];
+  const page = pages[Math.max(0, Math.min(cfg.page, pages.length - 1))];
 
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const size = cfg.font_size || 12;
@@ -239,17 +396,12 @@ async function renderTemplatePdf(env, { name, year, amount, date, inline }) {
 }
 
 async function generateReceiptPdf(env, { name, year, amount, date }) {
-  if (!env.RECEIPTS_BUCKET) throw new Error("R2_not_bound");
   const obj = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
-  if (!obj) throw new Error("template_not_found");
-
   const cfg = await getTemplateConfig(env);
   const bytes = await obj.arrayBuffer();
 
   const pdf = await PDFDocument.load(bytes);
-  const pages = pdf.getPages();
-  const pageIndex = Math.max(0, Math.min(cfg.page, pages.length - 1));
-  const page = pages[pageIndex];
+  const page = pdf.getPages()[Math.max(0, Math.min(cfg.page, pdf.getPages().length - 1))];
 
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const size = cfg.font_size || 12;
@@ -267,41 +419,7 @@ async function getTemplateConfig(env) {
   const row = await env.RECEIPTS_DB.prepare(
     "SELECT page,name_x,name_y,year_x,year_y,amount_x,amount_y,date_x,date_y,font_size FROM receipt_template_config WHERE id=1"
   ).first();
-
-  return row || {
-    page: 0,
-    name_x: 152, name_y: 650,
-    year_x: 450, year_y: 650,
-    amount_x: 410, amount_y: 548,
-    date_x: 450, date_y: 520,
-    font_size: 12
-  };
-}
-async function upsertTemplateConfig(env, cfg) {
-  await env.RECEIPTS_DB.prepare(`
-    INSERT INTO receipt_template_config
-      (id,page,name_x,name_y,year_x,year_y,amount_x,amount_y,date_x,date_y,font_size)
-    VALUES
-      (1,?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(id) DO UPDATE SET
-      page=excluded.page,
-      name_x=excluded.name_x,
-      name_y=excluded.name_y,
-      year_x=excluded.year_x,
-      year_y=excluded.year_y,
-      amount_x=excluded.amount_x,
-      amount_y=excluded.amount_y,
-      date_x=excluded.date_x,
-      date_y=excluded.date_y,
-      font_size=excluded.font_size
-  `).bind(
-    cfg.page,
-    cfg.name_x, cfg.name_y,
-    cfg.year_x, cfg.year_y,
-    cfg.amount_x, cfg.amount_y,
-    cfg.date_x, cfg.date_y,
-    cfg.font_size
-  ).run();
+  return row || { page:0, name_x:152, name_y:650, year_x:450, year_y:650, amount_x:410, amount_y:548, date_x:450, date_y:520, font_size:12 };
 }
 async function upsertAnnual(env, row) {
   await env.RECEIPTS_DB.prepare(`
@@ -339,25 +457,15 @@ function parseCsvRows(text) {
   if (lines.length < 2) return [];
   const header = lines[0].split(",").map(s => s.trim().toLowerCase());
   const idx = (name) => header.indexOf(name);
-
   const iMember = idx("member_id");
   const iBranch = idx("branch");
   const iAmount = idx("amount");
   const iYear = idx("year");
-
   if (iMember < 0 || iBranch < 0 || iAmount < 0) return [];
-
-  const out = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",").map(s => s.trim());
-    out.push({
-      member_id: cols[iMember] || "",
-      branch: cols[iBranch] || "",
-      amount: cols[iAmount] || "",
-      year: (iYear >= 0 ? (cols[iYear] || "") : "")
-    });
-  }
-  return out;
+  return lines.slice(1).map(line => {
+    const cols = line.split(",").map(s => s.trim());
+    return { member_id: cols[iMember] || "", branch: cols[iBranch] || "", amount: cols[iAmount] || "", year: (iYear>=0 ? (cols[iYear]||"") : "") };
+  });
 }
 function parseAmountToCents(v) {
   const s = String(v || "").replace(/[$,]/g, "").trim();
@@ -386,18 +494,11 @@ function json(obj, status = 200) {
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
   });
 }
-async function safeText(res) { try { return await res.text(); } catch { return ""; } }
 function must(v, msg) { if (!v) throw new Error(msg); return v; }
-function parseYears(s) {
-  const norm = String(s || "").trim().replace(/\s+/g, "").replace(/,/g, ";").replace(/;;+/g, ";").replace(/;$/g, "");
-  if (!norm) return [];
-  return norm.split(";").filter(Boolean);
-}
-function toBool(v) {
-  if (typeof v === "boolean") return v;
-  const s = String(v || "").toLowerCase().trim();
-  return s === "true" || s === "1" || s === "yes";
-}
+async function safeText(res) { try { return await res.text(); } catch { return ""; } }
+function normalizeYears(s) { return String(s).trim().replace(/\s+/g,"").replace(/,/g,";").replace(/;;+/g,";").replace(/;$/g,""); }
+function parseYears(s) { const norm = normalizeYears(s); return norm ? norm.split(";").filter(Boolean) : []; }
+function toBool(v) { if (typeof v === "boolean") return v; const s = String(v || "").toLowerCase().trim(); return s==="true"||s==="1"||s==="yes"; }
 
 // ---------- HubSpot ----------
 function hsHeaders(env) {
@@ -456,7 +557,7 @@ function escapeHtml(s) {
   );
 }
 
-// ---------- Member UI placeholder ----------
+// ---------- Member UI ----------
 function memberPortalHtml(env) {
   return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Receipt Portal</title></head><body style="font-family:system-ui;padding:24px">
