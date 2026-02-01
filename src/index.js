@@ -17,8 +17,8 @@ export default {
         return html(memberPortalHtml(), 200);
       }
 
-      // ===================== ADMIN API =====================
-      if (!path.startsWith("/api/admin/receipt/")) return json({ ok: false, error: "not_found" }, 404);
+      // =================== ADMIN API ===================
+      if (path.startsWith("/api/admin/receipt/")) {
 
       if (path === "/api/admin/receipt/_version" && request.method === "GET") {
         return json({ ok: true, worker: "kamikumite-receipt", build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3_CSV_QUOTES_OK" });
@@ -171,6 +171,8 @@ export default {
 
         const updated = await getJob(env, job_id);
         return json({ ok: true, job: updated, done: updated.status === "DONE", batch: { start, end, ok, ng } });
+       }
+          return json({ ok: false, error: "not_found" }, 404);
       }
 
       // ===================== MEMBER API =====================
