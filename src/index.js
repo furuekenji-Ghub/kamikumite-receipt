@@ -124,6 +124,60 @@ export default {
         return jsonC({ ok: false, error: "not_found" }, 404, allow, origin);
       }
 
+      // POST /api/admin/receipt/email/test
+// body: { to: string, name?: string, year?: number|string, amount_cents?: number, dry_run?: boolean }
+if (path === "/api/admin/receipt/email/test" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+
+  const to = String(body?.to || "").trim().toLowerCase();
+  const name = String(body?.name || "Test User").trim();
+  const year = normYear(body?.year) || (new Date()).getFullYear();
+  const amount_cents = Number.isFinite(body?.amount_cents) ? Number(body.amount_cents) : 100;
+  const dry_run = body?.dry_run === true;
+
+  if (!to) return json({ ok: false, error: "to_required" }, 400);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return json({ ok: false, error: "to_invalid" }, 400);
+
+  console.log("[email/test] start", { to, year, amount_cents, dry_run });
+
+  if (dry_run) {
+    return json({ ok: true, sent: false, dry_run: true, to, year, amount_cents });
+  }
+
+  try {
+    const r = await sendReceiptNoticeEmail(env, { to, name, year, amount_cents });
+
+    // sendReceiptNoticeEmail が Response を返す実装に対応
+    let provider_status = null;
+    let provider_body = null;
+    if (r && typeof r === "object" && typeof r.status === "number") {
+      provider_status = r.status;
+      provider_body = await r.text().catch(() => null);
+    }
+
+    console.log("[email/test] done", { to, provider_status });
+
+    // 500にしない（UIを止めない）
+    const sent = provider_status ? (provider_status >= 200 && provider_status < 300) : true;
+
+    return json({
+      ok: true,
+      sent,
+      to,
+      year,
+      amount_cents,
+      provider_status,
+      provider_body
+    });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    console.log("[email/test] failed", msg);
+
+    // throwしない・500にしない
+    return json({ ok: true, sent: false, to, year, amount_cents, warning: msg });
+  }
+}
+
       // ===================== ADMIN API =====================
       if (!path.startsWith("/api/admin/receipt/")) return json({ ok: false, error: "not_found" }, 404);
 
