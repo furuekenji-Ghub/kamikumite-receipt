@@ -17,6 +17,162 @@ export default {
         return html(memberPortalHtml(), 200);
       }
 
+      // ===================== ADMIN API =====================
+      if (!path.startsWith("/api/admin/receipt/")) return json({ ok: false, error: "not_found" }, 404);
+
+      if (path === "/api/admin/receipt/_version" && request.method === "GET") {
+        return json({ ok: true, worker: "kamikumite-receipt", build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3_CSV_QUOTES_OK" });
+      }
+
+      // --- validate ---
+      if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
+        const csvText = await request.text();
+        const rows = parseCsv(csvText);
+        if (!rows.length) return json({ ok: false, error: "no_rows" }, 400);
+
+        const errors = [];
+        const maxCheck = 1000;
+        const checkRows = rows.slice(0, maxCheck);
+
+        for (let i = 0; i < checkRows.length; i++) {
+          const r = checkRows[i];
+          const rowNo = i + 2;
+
+          const member_id = String(r.member_id || "").trim();
+          const branch = String(r.branch || "").trim();
+          const cents = parseMoneyToCents(r.amount);
+          const year = normYear(r.year);
+
+          if (!member_id) { errors.push({ type: "MISSING_MEMBER_ID", row: rowNo }); continue; }
+          if (!branch) { errors.push({ type: "MISSING_BRANCH", row: rowNo, member_id }); continue; }
+          if (cents === null) { errors.push({ type: "INVALID_AMOUNT", row: rowNo, member_id }); continue; }
+          if (!year) { errors.push({ type: "INVALID_YEAR", row: rowNo, member_id }); continue; }
+
+          const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email","firstname","lastname"]);
+          if (hs.status === 404 || !hs.ok) { errors.push({ type: "HUBSPOT_NOT_FOUND", row: rowNo, member_id }); continue; }
+
+          const p = (await hs.json()).properties || {};
+          const email = normEmail(p.email);
+          if (!email) errors.push({ type: "MISSING_EMAIL", row: rowNo, member_id, name: fmtName(p.firstname, p.lastname, p.email) });
+        }
+
+        if (errors.length) return json({ ok: false, errors, checked_rows: checkRows.length, total_rows: rows.length });
+        return json({ ok: true, checked_rows: checkRows.length, total_rows: rows.length });
+      }
+
+      // --- dashboard ---
+      if (path === "/api/admin/receipt/dashboard" && request.method === "GET") {
+        const year = normYear(url.searchParams.get("year")) ?? (new Date().getFullYear() - 1);
+        const rows = await env.RECEIPTS_DB.prepare(`
+          SELECT year, member_id, branch, name, amount_cents, issue_date, pdf_key, status, error
+          FROM receipt_annual WHERE year=? ORDER BY branch, name
+        `).bind(year).all();
+        return json({ ok: true, year, rows: rows.results || [] });
+      }
+
+      // --- pdf view ---
+      if (path === "/api/admin/receipt/pdf" && request.method === "GET") {
+        const member_id = String(url.searchParams.get("member_id") || "").trim();
+        const year = String(url.searchParams.get("year") || "").trim();
+        if (!member_id || !/^\d{4}$/.test(year)) return json({ ok: false, error: "member_id_and_year_required" }, 400);
+
+        const key = `receipts/${member_id}/${year}.pdf`;
+        const obj = await env.RECEIPTS_BUCKET.get(key);
+        if (!obj) return json({ ok: false, error: "pdf_not_found", key }, 404);
+        return new Response(obj.body, { status: 200, headers: { "content-type": "application/pdf", "cache-control": "no-store", "content-disposition": "inline" } });
+      }
+
+      // --- import (create job) ---
+      if (path === "/api/admin/receipt/import" && request.method === "POST") {
+        const csvText = await request.text();
+        const rows = parseCsv(csvText);
+        if (!rows.length) return json({ ok: false, error: "no_rows" }, 400);
+
+        const job_id = crypto.randomUUID();
+        const year = normYear(rows[0].year) ?? (new Date().getFullYear() - 1);
+
+        await env.RECEIPTS_DB.prepare(`
+          INSERT INTO receipt_import_job(job_id,year,total_rows,processed_rows,ok_rows,ng_rows,next_index,status,created_at,updated_at)
+          VALUES(?,?,?,0,0,0,0,'READY',datetime('now'),datetime('now'))
+        `).bind(job_id, year, rows.length).run();
+
+        await env.RECEIPTS_BUCKET.put(`uploads/${job_id}.csv`, csvText, { httpMetadata: { contentType: "text/csv" } });
+        return json({ ok: true, job_id, year, total_rows: rows.length });
+      }
+
+      // --- continue ---
+      if (path === "/api/admin/receipt/import/continue" && request.method === "POST") {
+        const job_id = String(url.searchParams.get("job_id") || "").trim();
+        const batch = clampInt(url.searchParams.get("batch"), 1, 200, 50);
+        if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
+
+        const job = await getJob(env, job_id);
+        if (!job) return json({ ok: false, error: "job_not_found" }, 404);
+
+        const csvObj = await env.RECEIPTS_BUCKET.get(`uploads/${job_id}.csv`);
+        if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
+
+        const rows = parseCsv(await csvObj.text());
+        const start = Number(job.next_index || 0);
+        const end = Math.min(rows.length, start + batch);
+
+        let ok = 0, ng = 0;
+
+        for (let i = start; i < end; i++) {
+          const r = rows[i];
+          const year = normYear(r.year) ?? job.year;
+          const cents = parseMoneyToCents(r.amount);
+
+          if (!r.member_id || !r.branch || cents === null || !year) {
+            ng++;
+            await upsertAnnual(env, { year: year || job.year, member_id: r.member_id || "(missing)", branch: r.branch || "(missing)",
+              name: "(invalid)", amount_cents: 0, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "invalid_row" });
+            continue;
+          }
+
+          const hs = await hubspotGetContactByIdProperty(env, r.member_id, "member_id", ["firstname","lastname","email","receipt_years_available"]);
+          if (!hs.ok) {
+            ng++;
+            await upsertAnnual(env, { year, member_id: r.member_id, branch: r.branch, name: "(HubSpot not found)", amount_cents: cents,
+              issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "hubspot_not_found" });
+            continue;
+          }
+
+          const p = (await hs.json()).properties || {};
+          const email = normEmail(p.email);
+          if (!email) {
+            ng++;
+            await upsertAnnual(env, { year, member_id: r.member_id, branch: r.branch, name: fmtName(p.firstname, p.lastname, p.email),
+              amount_cents: cents, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "missing_email" });
+            continue;
+          }
+
+          const name = fmtName(p.firstname, p.lastname, p.email);
+
+          const years = parseYears(p.receipt_years_available);
+          if (!years.includes(String(year))) years.push(String(year));
+          await hubspotPatchContactByIdProperty(env, r.member_id, "member_id", { receipt_portal_eligible: true, receipt_years_available: years.join(";") });
+
+          const pdf_key = `receipts/${r.member_id}/${year}.pdf`;
+          const pdf = await generateReceiptPdf(env, { name, year: String(year), amount: (cents / 100).toFixed(2), date: todayISO() });
+          await env.RECEIPTS_BUCKET.put(pdf_key, pdf, { httpMetadata: { contentType: "application/pdf" } });
+
+          await upsertAnnual(env, { year, member_id: r.member_id, branch: r.branch, name, amount_cents: cents, issue_date: todayISO(), pdf_key, status: "DONE", error: null });
+          ok++;
+        }
+
+        await env.RECEIPTS_DB.prepare(`
+          UPDATE receipt_import_job
+          SET processed_rows=?, ok_rows=ok_rows+?, ng_rows=ng_rows+?, next_index=?,
+              status=CASE WHEN ?>=total_rows THEN 'DONE' ELSE 'RUNNING' END,
+              updated_at=datetime('now')
+          WHERE job_id=?
+        `).bind(end, ok, ng, end, end, job_id).run();
+
+        const updated = await getJob(env, job_id);
+        return json({ ok: true, job: updated, done: updated.status === "DONE", batch: { start, end, ok, ng } });
+      }
+
       // ===================== MEMBER API =====================
       if (host === "api.kamikumite.worlddivinelight.org" && path.startsWith("/api/receipt/")) {
         const allow = env.PORTAL_ORIGIN || "https://kamikumite.worlddivinelight.org";
@@ -178,161 +334,6 @@ if (path === "/api/admin/receipt/email/test" && request.method === "POST") {
   }
 }
 
-      // ===================== ADMIN API =====================
-      if (!path.startsWith("/api/admin/receipt/")) return json({ ok: false, error: "not_found" }, 404);
-
-      if (path === "/api/admin/receipt/_version" && request.method === "GET") {
-        return json({ ok: true, worker: "kamikumite-receipt", build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3_CSV_QUOTES_OK" });
-      }
-
-      // --- validate ---
-      if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
-        const csvText = await request.text();
-        const rows = parseCsv(csvText);
-        if (!rows.length) return json({ ok: false, error: "no_rows" }, 400);
-
-        const errors = [];
-        const maxCheck = 1000;
-        const checkRows = rows.slice(0, maxCheck);
-
-        for (let i = 0; i < checkRows.length; i++) {
-          const r = checkRows[i];
-          const rowNo = i + 2;
-
-          const member_id = String(r.member_id || "").trim();
-          const branch = String(r.branch || "").trim();
-          const cents = parseMoneyToCents(r.amount);
-          const year = normYear(r.year);
-
-          if (!member_id) { errors.push({ type: "MISSING_MEMBER_ID", row: rowNo }); continue; }
-          if (!branch) { errors.push({ type: "MISSING_BRANCH", row: rowNo, member_id }); continue; }
-          if (cents === null) { errors.push({ type: "INVALID_AMOUNT", row: rowNo, member_id }); continue; }
-          if (!year) { errors.push({ type: "INVALID_YEAR", row: rowNo, member_id }); continue; }
-
-          const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email","firstname","lastname"]);
-          if (hs.status === 404 || !hs.ok) { errors.push({ type: "HUBSPOT_NOT_FOUND", row: rowNo, member_id }); continue; }
-
-          const p = (await hs.json()).properties || {};
-          const email = normEmail(p.email);
-          if (!email) errors.push({ type: "MISSING_EMAIL", row: rowNo, member_id, name: fmtName(p.firstname, p.lastname, p.email) });
-        }
-
-        if (errors.length) return json({ ok: false, errors, checked_rows: checkRows.length, total_rows: rows.length });
-        return json({ ok: true, checked_rows: checkRows.length, total_rows: rows.length });
-      }
-
-      // --- dashboard ---
-      if (path === "/api/admin/receipt/dashboard" && request.method === "GET") {
-        const year = normYear(url.searchParams.get("year")) ?? (new Date().getFullYear() - 1);
-        const rows = await env.RECEIPTS_DB.prepare(`
-          SELECT year, member_id, branch, name, amount_cents, issue_date, pdf_key, status, error
-          FROM receipt_annual WHERE year=? ORDER BY branch, name
-        `).bind(year).all();
-        return json({ ok: true, year, rows: rows.results || [] });
-      }
-
-      // --- pdf view ---
-      if (path === "/api/admin/receipt/pdf" && request.method === "GET") {
-        const member_id = String(url.searchParams.get("member_id") || "").trim();
-        const year = String(url.searchParams.get("year") || "").trim();
-        if (!member_id || !/^\d{4}$/.test(year)) return json({ ok: false, error: "member_id_and_year_required" }, 400);
-
-        const key = `receipts/${member_id}/${year}.pdf`;
-        const obj = await env.RECEIPTS_BUCKET.get(key);
-        if (!obj) return json({ ok: false, error: "pdf_not_found", key }, 404);
-        return new Response(obj.body, { status: 200, headers: { "content-type": "application/pdf", "cache-control": "no-store", "content-disposition": "inline" } });
-      }
-
-      // --- import (create job) ---
-      if (path === "/api/admin/receipt/import" && request.method === "POST") {
-        const csvText = await request.text();
-        const rows = parseCsv(csvText);
-        if (!rows.length) return json({ ok: false, error: "no_rows" }, 400);
-
-        const job_id = crypto.randomUUID();
-        const year = normYear(rows[0].year) ?? (new Date().getFullYear() - 1);
-
-        await env.RECEIPTS_DB.prepare(`
-          INSERT INTO receipt_import_job(job_id,year,total_rows,processed_rows,ok_rows,ng_rows,next_index,status,created_at,updated_at)
-          VALUES(?,?,?,0,0,0,0,'READY',datetime('now'),datetime('now'))
-        `).bind(job_id, year, rows.length).run();
-
-        await env.RECEIPTS_BUCKET.put(`uploads/${job_id}.csv`, csvText, { httpMetadata: { contentType: "text/csv" } });
-        return json({ ok: true, job_id, year, total_rows: rows.length });
-      }
-
-      // --- continue ---
-      if (path === "/api/admin/receipt/import/continue" && request.method === "POST") {
-        const job_id = String(url.searchParams.get("job_id") || "").trim();
-        const batch = clampInt(url.searchParams.get("batch"), 1, 200, 50);
-        if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
-
-        const job = await getJob(env, job_id);
-        if (!job) return json({ ok: false, error: "job_not_found" }, 404);
-
-        const csvObj = await env.RECEIPTS_BUCKET.get(`uploads/${job_id}.csv`);
-        if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
-
-        const rows = parseCsv(await csvObj.text());
-        const start = Number(job.next_index || 0);
-        const end = Math.min(rows.length, start + batch);
-
-        let ok = 0, ng = 0;
-
-        for (let i = start; i < end; i++) {
-          const r = rows[i];
-          const year = normYear(r.year) ?? job.year;
-          const cents = parseMoneyToCents(r.amount);
-
-          if (!r.member_id || !r.branch || cents === null || !year) {
-            ng++;
-            await upsertAnnual(env, { year: year || job.year, member_id: r.member_id || "(missing)", branch: r.branch || "(missing)",
-              name: "(invalid)", amount_cents: 0, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "invalid_row" });
-            continue;
-          }
-
-          const hs = await hubspotGetContactByIdProperty(env, r.member_id, "member_id", ["firstname","lastname","email","receipt_years_available"]);
-          if (!hs.ok) {
-            ng++;
-            await upsertAnnual(env, { year, member_id: r.member_id, branch: r.branch, name: "(HubSpot not found)", amount_cents: cents,
-              issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "hubspot_not_found" });
-            continue;
-          }
-
-          const p = (await hs.json()).properties || {};
-          const email = normEmail(p.email);
-          if (!email) {
-            ng++;
-            await upsertAnnual(env, { year, member_id: r.member_id, branch: r.branch, name: fmtName(p.firstname, p.lastname, p.email),
-              amount_cents: cents, issue_date: todayISO(), pdf_key: "", status: "ERROR", error: "missing_email" });
-            continue;
-          }
-
-          const name = fmtName(p.firstname, p.lastname, p.email);
-
-          const years = parseYears(p.receipt_years_available);
-          if (!years.includes(String(year))) years.push(String(year));
-          await hubspotPatchContactByIdProperty(env, r.member_id, "member_id", { receipt_portal_eligible: true, receipt_years_available: years.join(";") });
-
-          const pdf_key = `receipts/${r.member_id}/${year}.pdf`;
-          const pdf = await generateReceiptPdf(env, { name, year: String(year), amount: (cents / 100).toFixed(2), date: todayISO() });
-          await env.RECEIPTS_BUCKET.put(pdf_key, pdf, { httpMetadata: { contentType: "application/pdf" } });
-
-          await upsertAnnual(env, { year, member_id: r.member_id, branch: r.branch, name, amount_cents: cents, issue_date: todayISO(), pdf_key, status: "DONE", error: null });
-          ok++;
-        }
-
-        await env.RECEIPTS_DB.prepare(`
-          UPDATE receipt_import_job
-          SET processed_rows=?, ok_rows=ok_rows+?, ng_rows=ng_rows+?, next_index=?,
-              status=CASE WHEN ?>=total_rows THEN 'DONE' ELSE 'RUNNING' END,
-              updated_at=datetime('now')
-          WHERE job_id=?
-        `).bind(end, ok, ng, end, end, job_id).run();
-
-        const updated = await getJob(env, job_id);
-        return json({ ok: true, job: updated, done: updated.status === "DONE", batch: { start, end, ok, ng } });
-      }
 
       // --- rebuild ---
       if (path === "/api/admin/receipt/rebuild" && request.method === "POST") {
