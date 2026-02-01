@@ -499,6 +499,12 @@ function normYear(v) {
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
 }
 
+function clampInt(v, min, max, def) {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, n));
+}
+
 /* ===================== Resend / Mail (required) ===================== */
 
 async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
