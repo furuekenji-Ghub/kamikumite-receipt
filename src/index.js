@@ -499,5 +499,69 @@ function normYear(v) {
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
 }
 
+/* ===================== Resend / Mail (required) ===================== */
+
+async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
+  const portal = (env.PORTAL_ORIGIN || "https://kamikumite.worlddivinelight.org") + "/receipt/";
+  const subject = `Annual Donation Receipt (${year}) – World Divine Light`;
+  const amount = (Number(amount_cents) / 100).toFixed(2);
+
+  const html = `
+  <div style="font-family:Arial,sans-serif;line-height:1.6">
+    <p>Dear ${escapeHtml(name || "Member")},</p>
+    <p>This email is from World Divine Light regarding your Annual Donation Receipt.</p>
+    <p>Unless otherwise requested, the receipt reflects the total amount of donations you made during the calendar year <b>${escapeHtml(String(year))}</b>.</p>
+    <p><b>Total amount:</b> $${escapeHtml(amount)}</p>
+    <p>Please download your receipt from the link below and use it as needed for your tax filing for this year.</p>
+    <p>You will be asked to sign in with your email address and a one-time verification code.</p>
+    <p><a href="${portal}">${portal}</a></p>
+    <p>— World Divine Light</p>
+  </div>`;
+
+  await sendResend(env, { to, subject, html });
+}
+
+async function sendResend(env, { to, subject, html }) {
+  const apiKey = must(env.RESEND_API_KEY, "Missing RESEND_API_KEY");
+  const from = must(env.MAIL_FROM, "Missing MAIL_FROM");
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      html,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`resend_failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+
+  return res;
+}
+
+/* ===================== Small helpers (required) ===================== */
+
+function must(v, msg) {
+  if (!v) throw new Error(msg);
+  return v;
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[c]));
+}
+
 // ... (helpers: sendReceiptNoticeEmail, sendResend, HubSpot, PDF, CSV, utils)
 // Keep ALL your existing helper implementations below this line unchanged
