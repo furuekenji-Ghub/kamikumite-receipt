@@ -24,6 +24,8 @@ export default {
        * ===================================================== */
       if (path.startsWith("/api/admin/receipt/")) {
 
+        
+
         // --- version ---
         if (path === "/api/admin/receipt/_version" && request.method === "GET") {
           return json({
@@ -32,6 +34,159 @@ export default {
             build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3_CSV_QUOTES_OK"
           });
         }
+
+        // =====================================================
+// Email Bulk Job (START / STATUS / CONTINUE)
+// =====================================================
+
+// POST /api/admin/receipt/email/job/start
+if (path === "/api/admin/receipt/email/job/start" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const year = normYear(body?.year);
+  const branch = String(body?.branch || "ALL").trim();
+  const mode = String(body?.mode || "unsent").trim().toLowerCase(); // unsent | all
+  if (!year) return json({ ok: false, error: "year_required" }, 400);
+
+  const job_id = crypto.randomUUID();
+
+  let q = `SELECT COUNT(*) as n FROM receipt_annual WHERE year=? AND status='DONE'`;
+  const args = [year];
+  if (branch !== "ALL") { q += ` AND branch=?`; args.push(branch); }
+  if (mode === "unsent") { q += ` AND (email_sent_at IS NULL OR TRIM(email_sent_at)='')`; }
+
+  const cnt = await env.RECEIPTS_DB.prepare(q).bind(...args).first();
+  const total_targets = Number(cnt?.n || 0);
+
+  await env.RECEIPTS_DB.prepare(`
+    INSERT INTO receipt_email_job(job_id, year, branch, total_targets, next_index, sent_ok, sent_ng, status, created_at, updated_at)
+    VALUES(?, ?, ?, ?, 0, 0, 0, 'READY', datetime('now'), datetime('now'))
+  `).bind(job_id, year, branch, total_targets).run();
+
+  return json({ ok: true, job_id, year, branch, mode, total_targets });
+}
+
+// GET /api/admin/receipt/email/job/status?job_id=...
+if (path === "/api/admin/receipt/email/job/status" && request.method === "GET") {
+  const job_id = String(url.searchParams.get("job_id") || "").trim();
+  if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
+
+  const job = await env.RECEIPTS_DB.prepare(`SELECT * FROM receipt_email_job WHERE job_id=?`).bind(job_id).first();
+  if (!job) return json({ ok: false, error: "job_not_found" }, 404);
+
+  return json({ ok: true, job });
+}
+
+// POST /api/admin/receipt/email/job/continue?job_id=...&batch=25&mode=unsent
+if (path === "/api/admin/receipt/email/job/continue" && request.method === "POST") {
+  const job_id = String(url.searchParams.get("job_id") || "").trim();
+  const batch = clampInt(url.searchParams.get("batch"), 1, 100, 25);
+  const mode = String(url.searchParams.get("mode") || "unsent").trim().toLowerCase(); // unsent | all
+  if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
+
+  const job = await env.RECEIPTS_DB.prepare(`SELECT * FROM receipt_email_job WHERE job_id=?`).bind(job_id).first();
+  if (!job) return json({ ok: false, error: "job_not_found" }, 404);
+
+  const st = String(job.status || "").toUpperCase();
+  if (st === "DONE") return json({ ok: true, done: true, job });
+  if (st === "CANCELED") return json({ ok: false, error: "job_canceled", job }, 409);
+
+  const year = Number(job.year);
+  const branch = String(job.branch || "ALL");
+  const start = Number(job.next_index || 0);
+
+  let q = `
+    SELECT year, member_id, branch, name, amount_cents, email, status, email_sent_at
+    FROM receipt_annual
+    WHERE year=? AND status='DONE'
+  `;
+  const args = [year];
+
+  if (branch !== "ALL") { q += ` AND branch=?`; args.push(branch); }
+  if (mode === "unsent") { q += ` AND (email_sent_at IS NULL OR TRIM(email_sent_at)='')`; }
+
+  q += ` ORDER BY branch, name, member_id LIMIT ? OFFSET ?`;
+  args.push(batch, start);
+
+  const rows = await env.RECEIPTS_DB.prepare(q).bind(...args).all();
+  const list = rows.results || [];
+
+  let sent_ok = 0, sent_ng = 0;
+  const results = [];
+
+  for (const r of list) {
+    const member_id = String(r.member_id || "").trim();
+    const rowYear = Number(r.year);
+    let email = String(r.email || "").trim().toLowerCase();
+
+    if (!email) {
+      try { email = (await getEmailByMemberId(env, member_id)) || ""; } catch { email = ""; }
+    }
+
+    if (!email) {
+      sent_ng++;
+      results.push({ member_id, ok: false, error: "missing_email" });
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_annual
+        SET email_status='NEEDS_EMAIL', email_error='missing_email'
+        WHERE year=? AND member_id=?
+      `).bind(rowYear, member_id).run();
+      continue;
+    }
+
+    try {
+      await sendReceiptNoticeEmail(env, {
+        to: email,
+        name: r.name || "Member",
+        year: rowYear,
+        amount_cents: Number(r.amount_cents || 0),
+      });
+
+      sent_ok++;
+      results.push({ member_id, ok: true, to: email });
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_annual
+        SET email=?, email_status='SENT', email_error=NULL, email_sent_at=datetime('now')
+        WHERE year=? AND member_id=?
+      `).bind(email, rowYear, member_id).run();
+
+    } catch (e) {
+      const msg = String(e?.message || e);
+      sent_ng++;
+      results.push({ member_id, ok: false, to: email, error: msg });
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_annual
+        SET email=?, email_status='FAILED', email_error=?
+        WHERE year=? AND member_id=?
+      `).bind(email, msg, rowYear, member_id).run();
+    }
+  }
+
+  const next_index = start + list.length;
+  const done = list.length < batch;
+
+  await env.RECEIPTS_DB.prepare(`
+    UPDATE receipt_email_job
+    SET next_index=?,
+        sent_ok=sent_ok+?,
+        sent_ng=sent_ng+?,
+        status=?,
+        updated_at=datetime('now')
+    WHERE job_id=?
+  `).bind(next_index, sent_ok, sent_ng, done ? "DONE" : "RUNNING", job_id).run();
+
+  const updated = await env.RECEIPTS_DB.prepare(`SELECT * FROM receipt_email_job WHERE job_id=?`).bind(job_id).first();
+
+  return json({
+    ok: true,
+    done,
+    job: updated,
+    batch: { start, count: list.length, sent_ok, sent_ng, next_index },
+    results
+  });
+}
 
         // --- email/test ---
         if (path === "/api/admin/receipt/email/test" && request.method === "POST") {
