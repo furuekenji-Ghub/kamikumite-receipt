@@ -484,5 +484,15 @@ export default {
  * Helper functions (unchanged)
  * ========================================================= */
 
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 // ... (helpers: sendReceiptNoticeEmail, sendResend, HubSpot, PDF, CSV, utils)
 // Keep ALL your existing helper implementations below this line unchanged
