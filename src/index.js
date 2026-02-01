@@ -494,5 +494,10 @@ function json(obj, status = 200) {
   });
 }
 
+function normYear(v) {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
+}
+
 // ... (helpers: sendReceiptNoticeEmail, sendResend, HubSpot, PDF, CSV, utils)
 // Keep ALL your existing helper implementations below this line unchanged
