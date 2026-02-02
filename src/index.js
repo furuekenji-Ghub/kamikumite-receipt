@@ -957,6 +957,17 @@ async function sendResend(env, { to, subject, html }) {
   return res;
 }
 
+function otpHtml(code) {
+  return `<div style="font-family:Arial,sans-serif;line-height:1.6">
+    <p>Your verification code is:</p>
+    <p style="font-size:24px;font-weight:800;letter-spacing:2px">
+      ${escapeHtml(code)}
+    </p>
+    <p>This code will expire in 10 minutes.</p>
+    <p>— World Divine Light</p>
+  </div>`;
+}
+
 /* ===================== Small helpers (required) ===================== */
 
 function must(v, msg) {
