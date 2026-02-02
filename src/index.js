@@ -850,19 +850,172 @@ function memberPortalHtml() {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Receipt Portal</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:24px;line-height:1.6}
-    .card{max-width:720px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:20px}
-    h1{font-size:20px;margin:0 0 12px}
+    :root{--b:#e5e7eb;--fg:#111827;--muted:#6b7280;--blue:#2563eb;--bg:#ffffff;}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:24px;color:var(--fg);background:#fff;line-height:1.6}
+    .wrap{max-width:760px;margin:0 auto}
+    .card{border:1px solid var(--b);border-radius:14px;padding:22px;background:var(--bg)}
+    h1{font-size:24px;margin:0 0 10px}
     p{margin:8px 0}
-    a{color:#2563eb}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+    .field{flex:1;min-width:220px}
+    label{display:block;font-weight:600;font-size:13px;margin:0 0 6px}
+    input,select{width:100%;padding:10px 12px;border:1px solid var(--b);border-radius:10px;font-size:14px}
+    button{padding:10px 14px;border-radius:10px;border:1px solid var(--b);background:#111827;color:#fff;cursor:pointer;font-weight:600}
+    button.secondary{background:#fff;color:#111827}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .muted{color:var(--muted);font-size:13px}
+    .msg{margin-top:12px;padding:10px 12px;border:1px solid var(--b);border-radius:10px;background:#f9fafb;font-size:14px;white-space:pre-wrap}
+    .years{margin-top:18px}
+    .year-item{display:flex;align-items:center;justify-content:space-between;border:1px solid var(--b);border-radius:10px;padding:10px 12px;margin-top:10px}
+    a{color:var(--blue)}
   </style>
 </head>
 <body>
+<div class="wrap">
   <div class="card">
     <h1>Receipt Portal</h1>
     <p>Please sign in with your email address and a one-time verification code.</p>
-    <p>If you arrived here from the receipt email, use the same email address you received it at.</p>
+    <p class="muted">If you arrived here from the receipt email, use the same email address you received it at.</p>
+
+    <div class="row">
+      <div class="field">
+        <label>Email</label>
+        <input id="email" type="email" placeholder="you@example.com" autocomplete="email" />
+      </div>
+      <div class="field" style="max-width:220px">
+        <label>Verification code</label>
+        <input id="code" type="text" inputmode="numeric" placeholder="6 digits" maxlength="6" />
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="btnSend">Send code</button>
+      <button id="btnVerify" class="secondary">Verify</button>
+      <button id="btnRefresh" class="secondary" disabled>Refresh years</button>
+    </div>
+
+    <div id="msg" class="msg" style="display:none"></div>
+
+    <div class="years">
+      <div style="font-weight:700;margin-top:18px">Available receipts</div>
+      <div id="yearsList" class="muted">Not signed in yet.</div>
+    </div>
   </div>
+</div>
+
+<script>
+  const API = "https://api.kamikumite.worlddivinelight.org";
+  const $ = (id) => document.getElementById(id);
+
+  function showMsg(t){
+    const el = $("msg");
+    el.style.display = "block";
+    el.textContent = t;
+  }
+  function clearMsg(){
+    const el = $("msg");
+    el.style.display = "none";
+    el.textContent = "";
+  }
+
+  async function postJson(path, body){
+    const r = await fetch(API + path, {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify(body || {}),
+      credentials: "include"
+    });
+    const ct = r.headers.get("content-type") || "";
+    const isJson = ct.includes("application/json");
+    const data = isJson ? await r.json() : await r.text();
+    return { r, data };
+  }
+
+  async function getJson(path){
+    const r = await fetch(API + path, {
+      method: "GET",
+      credentials: "include"
+    });
+    const ct = r.headers.get("content-type") || "";
+    const isJson = ct.includes("application/json");
+    const data = isJson ? await r.json() : await r.text();
+    return { r, data };
+  }
+
+  async function renderYears(){
+    const box = $("yearsList");
+    box.innerHTML = "";
+    const { r, data } = await getJson("/api/receipt/me");
+    if (!r.ok || !data || data.ok === false) {
+      box.textContent = "Not signed in yet.";
+      $("btnRefresh").disabled = true;
+      return;
+    }
+    $("btnRefresh").disabled = false;
+
+    const years = Array.isArray(data.years) ? data.years : [];
+    if (!years.length) {
+      box.textContent = "No receipts available.";
+      return;
+    }
+
+    const list = document.createElement("div");
+    for (const y of years) {
+      const item = document.createElement("div");
+      item.className = "year-item";
+      const left = document.createElement("div");
+      left.innerHTML = "<b>" + y + "</b>";
+      const right = document.createElement("div");
+      const a = document.createElement("a");
+      a.href = API + "/api/receipt/pdf?year=" + encodeURIComponent(y);
+      a.textContent = "Download PDF";
+      a.target = "_blank";
+      a.rel = "noopener";
+      right.appendChild(a);
+      item.appendChild(left);
+      item.appendChild(right);
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+  }
+
+  $("btnSend").addEventListener("click", async () => {
+    clearMsg();
+    const email = ($("email").value || "").trim();
+    if (!email) return showMsg("Please enter your email.");
+
+    const { r, data } = await postJson("/api/receipt/request-code", { email });
+    if (r.ok && data && data.ok) {
+      showMsg("A verification code has been sent to your email.\\nPlease check your inbox.");
+      return;
+    }
+    showMsg("Failed to send code:\\n" + JSON.stringify(data));
+  });
+
+  $("btnVerify").addEventListener("click", async () => {
+    clearMsg();
+    const email = ($("email").value || "").trim();
+    const code = ($("code").value || "").trim();
+    if (!email) return showMsg("Please enter your email.");
+    if (!/^\\d{6}$/.test(code)) return showMsg("Please enter the 6-digit code.");
+
+    const { r, data } = await postJson("/api/receipt/verify-code", { email, code });
+    if (r.ok && data && data.ok) {
+      showMsg("Signed in successfully.\\nAvailable years: " + (data.years || []).join(", "));
+      await renderYears();
+      return;
+    }
+    showMsg("Verification failed:\\n" + JSON.stringify(data));
+  });
+
+  $("btnRefresh").addEventListener("click", async () => {
+    clearMsg();
+    await renderYears();
+  });
+
+  // try to load years if already signed in
+  renderYears().catch(()=>{});
+</script>
 </body>
 </html>`;
 }
