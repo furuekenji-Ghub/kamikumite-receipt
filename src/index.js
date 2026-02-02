@@ -808,6 +808,16 @@ function json(obj, status = 200) {
   });
 }
 
+function html(body, status = 200) {
+  return new Response(String(body ?? ""), {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function normYear(v) {
   const n = parseInt(String(v ?? "").trim(), 10);
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
