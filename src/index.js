@@ -1584,7 +1584,7 @@ async function generateReceiptPdf(env, { name, year, amount, date }) {
   pdf.registerFontkit(fontkit);
 
   // ★CJKフォントをR2から取得
-  const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansCJKjp-Regular.otf");
+  const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-VariableFont_wght.ttf");
   if (!fontObj) throw new Error("cjk_font_not_found");
 
   const fontBytes = await fontObj.arrayBuffer();
