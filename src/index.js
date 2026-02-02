@@ -373,6 +373,55 @@ if (path === "/api/admin/receipt/email/send-one" && request.method === "POST") {
   }
 }
 
+// --- bulk-delete-year ---
+// UI Request URL: /api/admin/receipt/bulk-delete-year
+// body: { year: 2025, confirm: "DELETE 2025" }
+if (path === "/api/admin/receipt/bulk-delete-year" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const year = normYear(body?.year);
+  const confirm = String(body?.confirm || "").trim();
+
+  // 安全：前年（現在年-1）だけ許可
+  const allowedYear = (new Date()).getFullYear() - 1;
+  if (!year) return json({ ok:false, error:"year_required" }, 400);
+  if (year !== allowedYear) return json({ ok:false, error:"year_not_allowed", allowedYear }, 403);
+
+  // UIが要求する確認文字列
+  const required = `DELETE ${year}`;
+  if (confirm !== required) {
+    return json({ ok:false, error:"typed_confirmation_required", required }, 400);
+  }
+
+  // 先にPDFキーを拾う（R2削除用）
+  const rows = await env.RECEIPTS_DB
+    .prepare(`SELECT pdf_key FROM receipt_annual WHERE year=?`)
+    .bind(year)
+    .all();
+
+  const keys = (rows?.results || [])
+    .map(r => String(r.pdf_key || "").trim())
+    .filter(Boolean);
+
+  // DB削除
+  await env.RECEIPTS_DB
+    .prepare(`DELETE FROM receipt_annual WHERE year=?`)
+    .bind(year)
+    .run();
+
+  // R2削除
+  let deleted_pdf = 0;
+  for (const k of keys) {
+    try { await env.RECEIPTS_BUCKET.delete(k); deleted_pdf++; } catch {}
+  }
+
+  return json({
+    ok: true,
+    year,
+    deleted_rows: rows?.results?.length || 0,
+    deleted_pdf
+  });
+}
+        
         // --- email/send-selected ---
 // UI Request URL: /api/admin/receipt/email/send-selected
 // body: { selections: [{ member_id, year }...], dry_run?: boolean }
