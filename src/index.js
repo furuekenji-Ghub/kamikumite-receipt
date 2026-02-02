@@ -119,8 +119,16 @@ if (path === "/api/admin/receipt/email/job/continue" && request.method === "POST
     let email = String(r.email || "").trim().toLowerCase();
 
     if (!email) {
-      try { email = (await getEmailByMemberId(env, member_id)) || ""; } catch { email = ""; }
+  try {
+    const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email"]);
+    if (hs && hs.ok) {
+      const p = (await hs.json()).properties || {};
+      email = String(p.email || "").trim().toLowerCase();
     }
+  } catch {
+    email = "";
+  }
+}
 
     if (!email) {
       sent_ng++;
