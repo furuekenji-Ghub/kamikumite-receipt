@@ -944,6 +944,33 @@ function memberPortalHtml() {
   margin-bottom: 6px;
   font-weight: 600;
 }
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+}
+
+/* 各入力ブロック */
+.field {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+/* input が親をはみ出さないように */
+.field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* スマホでは縦並び */
+@media (max-width: 640px) {
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+}
   
     :root{--b:#e5e7eb;--fg:#111827;--muted:#6b7280;--blue:#2563eb;--bg:#ffffff;}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:24px;color:var(--fg);background:#fff;line-height:1.6}
