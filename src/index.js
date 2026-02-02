@@ -848,6 +848,13 @@ function normYear(v) {
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
 }
 
+function toBool(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "true" || s === "1" || s === "yes" || s === "y";
+}
+
 function clampInt(v, min, max, def) {
   const n = parseInt(String(v ?? "").trim(), 10);
   if (!Number.isFinite(n)) return def;
