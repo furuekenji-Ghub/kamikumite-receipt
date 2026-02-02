@@ -1573,37 +1573,49 @@ async function getTemplateConfig(env) {
 }
 
 async function generateReceiptPdf(env, { name, year, amount, date }) {
-  const obj = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
-  if (!obj) throw new Error("template_not_found");
+  const templateObj = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
+  if (!templateObj) throw new Error("template_not_found");
 
   const cfg = await getTemplateConfig(env);
 
-  const pdf = await PDFDocument.load(await obj.arrayBuffer());
+  const pdf = await PDFDocument.load(await templateObj.arrayBuffer());
+
+  // ★必須：fontkit登録
+  pdf.registerFontkit(fontkit);
+
+  // ★CJKフォントをR2から取得
+  const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansCJKjp-Regular.otf");
+  if (!fontObj) throw new Error("cjk_font_not_found");
+
+  const fontBytes = await fontObj.arrayBuffer();
+
+  // ★subset=true が超重要（使った文字だけ埋め込み→巨大フォントでも現実的）
+  const cjkFont = await pdf.embedFont(fontBytes, { subset: true });
+
   const pages = pdf.getPages();
   const pageIndex = Math.max(0, Math.min(Number(cfg.page || 0), pages.length - 1));
   const page = pages[pageIndex];
 
-  const font = await pdf.embedFont(StandardFonts.Helvetica);
   const size = Number(cfg.font_size || 12);
 
   page.drawText(String(name ?? ""), {
     x: Number(cfg.name_x), y: Number(cfg.name_y),
-    size, font, color: rgb(0, 0, 0)
+    size, font: cjkFont, color: rgb(0, 0, 0)
   });
 
   page.drawText(String(year ?? ""), {
     x: Number(cfg.year_x), y: Number(cfg.year_y),
-    size, font, color: rgb(0, 0, 0)
+    size, font: cjkFont, color: rgb(0, 0, 0)
   });
 
   page.drawText(String(amount ?? ""), {
     x: Number(cfg.amount_x), y: Number(cfg.amount_y),
-    size, font, color: rgb(0, 0, 0)
+    size, font: cjkFont, color: rgb(0, 0, 0)
   });
 
   page.drawText(String(date ?? ""), {
     x: Number(cfg.date_x), y: Number(cfg.date_y),
-    size, font, color: rgb(0, 0, 0)
+    size, font: cjkFont, color: rgb(0, 0, 0)
   });
 
   return await pdf.save();
