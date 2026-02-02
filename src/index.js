@@ -848,6 +848,14 @@ function normYear(v) {
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
 }
 
+function parseYears(v) {
+  // "2025;2024" も "2025,2024" も "2025 2024" も吸収
+  return String(v ?? "")
+    .split(/[;, \n\r\t]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
 function toBool(v) {
   if (v === true) return true;
   if (v === false) return false;
