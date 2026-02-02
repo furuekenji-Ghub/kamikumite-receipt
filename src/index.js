@@ -293,6 +293,116 @@ if (path === "/api/admin/receipt/hubspot/email" && request.method === "GET") {
   }
 }
 
+        // --- email/send-selected ---
+// UI Request URL: /api/admin/receipt/email/send-selected
+// body: { selections: [{ member_id, year }...], dry_run?: boolean }
+if (path === "/api/admin/receipt/email/send-selected" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const selections = Array.isArray(body?.selections) ? body.selections : [];
+  const dry_run = body?.dry_run === true;
+
+  if (!selections.length) {
+    return json({ ok: false, error: "selections_required" }, 400);
+  }
+
+  let sent_ok = 0;
+  let sent_ng = 0;
+  const results = [];
+
+  for (const s of selections) {
+    const member_id = String(s?.member_id || "").trim();
+    const year = normYear(s?.year);
+
+    if (!member_id || !year) {
+      sent_ng++;
+      results.push({ member_id, year, ok: false, error: "member_id_and_year_required" });
+      continue;
+    }
+
+    // receipt_annual から対象行を取得
+    const row = await env.RECEIPTS_DB
+      .prepare(`SELECT year, member_id, name, branch, amount_cents, status, email FROM receipt_annual WHERE year=? AND member_id=?`)
+      .bind(year, member_id)
+      .first();
+
+    if (!row) {
+      sent_ng++;
+      results.push({ member_id, year, ok: false, error: "row_not_found" });
+      continue;
+    }
+
+    if (String(row.status || "").toUpperCase() !== "DONE") {
+      sent_ng++;
+      results.push({ member_id, year, ok: false, error: "not_done" });
+      continue;
+    }
+
+    // email は D1 を優先、無ければ HubSpot から取得
+    let email = String(row.email || "").trim().toLowerCase();
+    if (!email) {
+      try {
+        const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email"]);
+        if (hs && hs.ok) {
+          const p = (await hs.json()).properties || {};
+          email = String(p.email || "").trim().toLowerCase();
+        }
+      } catch {
+        email = "";
+      }
+    }
+
+    if (!email) {
+      sent_ng++;
+      results.push({ member_id, year, ok: false, error: "missing_email" });
+
+      // 状態を NEEDS_EMAIL にしておく（再処理UX用）
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_annual
+        SET email_status='NEEDS_EMAIL', email_error='missing_email'
+        WHERE year=? AND member_id=?
+      `).bind(year, member_id).run();
+
+      continue;
+    }
+
+    if (dry_run) {
+      results.push({ member_id, year, ok: true, dry_run: true, to: email });
+      continue;
+    }
+
+    try {
+      await sendReceiptNoticeEmail(env, {
+        to: email,
+        name: row.name || "Member",
+        year: row.year,
+        amount_cents: Number(row.amount_cents || 0),
+      });
+
+      sent_ok++;
+      results.push({ member_id, year, ok: true, to: email });
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_annual
+        SET email=?, email_status='SENT', email_error=NULL, email_sent_at=datetime('now')
+        WHERE year=? AND member_id=?
+      `).bind(email, year, member_id).run();
+
+    } catch (e) {
+      const msg = String(e?.message || e);
+      sent_ng++;
+      results.push({ member_id, year, ok: false, to: email, error: msg });
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_annual
+        SET email=?, email_status='FAILED', email_error=?
+        WHERE year=? AND member_id=?
+      `).bind(email, msg, year, member_id).run();
+    }
+  }
+
+  return json({ ok: true, dry_run, targets: selections.length, sent_ok, sent_ng, results });
+}
+
         // --- import/validate ---
         if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
           const csvText = await request.text();
