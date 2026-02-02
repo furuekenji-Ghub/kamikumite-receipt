@@ -818,6 +818,31 @@ function html(body, status = 200) {
   });
 }
 
+function memberPortalHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Receipt Portal</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:24px;line-height:1.6}
+    .card{max-width:720px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:20px}
+    h1{font-size:20px;margin:0 0 12px}
+    p{margin:8px 0}
+    a{color:#2563eb}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Receipt Portal</h1>
+    <p>Please sign in with your email address and a one-time verification code.</p>
+    <p>If you arrived here from the receipt email, use the same email address you received it at.</p>
+  </div>
+</body>
+</html>`;
+}
+
 function normYear(v) {
   const n = parseInt(String(v ?? "").trim(), 10);
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
