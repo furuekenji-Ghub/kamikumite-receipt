@@ -808,6 +808,63 @@ if (path === "/api/admin/receipt/import/validate" && request.method === "POST") 
           return json({ ok: true, job: updated, done: updated.status === "DONE", batch: { start, end, ok, ng } });
         }
 
+        // --- delete-selected ---
+// UI Request URL: /api/admin/receipt/delete-selected
+// body: { selections:[{member_id,year}...] } もしくは { member_id, year }（個別削除）も許容
+if (path === "/api/admin/receipt/delete-selected" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+
+  // ① 選択削除：selections 配列
+  let selections =
+    Array.isArray(body?.selections) ? body.selections :
+    Array.isArray(body?.selected) ? body.selected :
+    Array.isArray(body?.items) ? body.items :
+    [];
+
+  // ② 個別削除：member_id/year だけで来る場合も吸収
+  if (!selections.length) {
+    const member_id = String(body?.member_id || body?.memberId || "").trim();
+    const year = normYear(body?.year);
+    if (member_id && year) selections = [{ member_id, year }];
+  }
+
+  if (!selections.length) return json({ ok:false, error:"selections_required" }, 400);
+
+  let deleted_ok = 0, deleted_ng = 0;
+  const results = [];
+
+  for (const s of selections) {
+    const member_id = String(s?.member_id || s?.memberId || "").trim();
+    const year = normYear(s?.year);
+
+    if (!member_id || !year) {
+      deleted_ng++;
+      results.push({ ok:false, member_id, year, error:"member_id_and_year_required" });
+      continue;
+    }
+
+    const row = await env.RECEIPTS_DB
+      .prepare(`SELECT pdf_key FROM receipt_annual WHERE year=? AND member_id=?`)
+      .bind(year, member_id)
+      .first();
+
+    await env.RECEIPTS_DB
+      .prepare(`DELETE FROM receipt_annual WHERE year=? AND member_id=?`)
+      .bind(year, member_id)
+      .run();
+
+    const pdf_key = String(row?.pdf_key || "").trim();
+    if (pdf_key) {
+      try { await env.RECEIPTS_BUCKET.delete(pdf_key); } catch {}
+    }
+
+    deleted_ok++;
+    results.push({ ok:true, member_id, year, deleted_pdf_key: pdf_key || null });
+  }
+
+  return json({ ok:true, deleted_ok, deleted_ng, results });
+}
+
         // --- admin fallback ---
         return json({ ok: false, error: "not_found" }, 404);
       }
