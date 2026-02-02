@@ -856,6 +856,14 @@ function parseYears(v) {
     .filter(Boolean);
 }
 
+async function sha256Hex(s) {
+  const bytes = new TextEncoder().encode(String(s ?? ""));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function toBool(v) {
   if (v === true) return true;
   if (v === false) return false;
