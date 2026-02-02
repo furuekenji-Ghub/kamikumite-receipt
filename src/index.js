@@ -1326,6 +1326,42 @@ function normEmail(v) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : "";
 }
 
+function parseCsv(text) {
+  if (!text) return [];
+
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter(l => l.trim().length);
+
+  if (lines.length < 2) return [];
+
+  const headers = lines[0].split(",").map(h => h.trim());
+
+  return lines.slice(1).map(line => {
+    const cols = line.split(",").map(c => c.trim());
+    const row = {};
+    headers.forEach((h, i) => {
+      row[h] = cols[i] ?? "";
+    });
+    return row;
+  });
+}
+
+function parseMoneyToCents(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).replace(/[,¥$]/g, "").trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+}
+
+function fmtName(first, last, email) {
+  const name = [first, last].filter(Boolean).join(" ").trim();
+  return name || email || "(unknown)";
+}
+
 /* ===================== HubSpot (required) ===================== */
 
 function hsHeaders(env) {
