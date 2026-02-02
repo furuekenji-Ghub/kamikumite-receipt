@@ -1350,11 +1350,25 @@ function parseCsv(text) {
 }
 
 function parseMoneyToCents(v) {
-  if (v === null || v === undefined) return null;
-  const s = String(v).replace(/[,¥$]/g, "").trim();
-  if (!s) return null;
+  const raw = String(v ?? "").trim();
+  if (!raw) return null;
+
+  // ()でマイナス表記対応
+  const neg = raw.startsWith("(") && raw.endsWith(")");
+  const s0 = neg ? raw.slice(1, -1) : raw;
+
+  // 通貨記号と空白を除去
+  let s = s0.replace(/[\s$¥]/g, "");
+
+  // 千位区切りカンマ除去
+  s = s.replace(/,/g, "");
+
+  // 数値として解釈
   const n = Number(s);
-  return Number.isFinite(n) ? Math.round(n * 100) : null;
+  if (!Number.isFinite(n)) return null;
+
+  const cents = Math.round(n * 100);
+  return neg ? -cents : cents;
 }
 
 function fmtName(first, last, email) {
