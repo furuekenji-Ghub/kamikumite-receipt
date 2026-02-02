@@ -854,6 +854,13 @@ function clampInt(v, min, max, def) {
   return Math.max(min, Math.min(max, n));
 }
 
+function normEmail(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "";
+  // 簡易チェック（厳密でなくてOK）
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : "";
+}
+
 /* ===================== HubSpot (required) ===================== */
 
 function hsHeaders(env) {
