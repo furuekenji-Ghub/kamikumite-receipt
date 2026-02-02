@@ -1580,17 +1580,17 @@ async function generateReceiptPdf(env, { name, year, amount, date }) {
 
   const pdf = await PDFDocument.load(await templateObj.arrayBuffer());
 
-  // ★必須：fontkit登録
+  // ★必須：fontkit登録（CJKフォント埋め込みに必要）
   pdf.registerFontkit(fontkit);
 
-  // ★CJKフォントをR2から取得
+  // ★R2から日本語フォント（可変TTF）を取得
   const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-VariableFont_wght.ttf");
-  if (!fontObj) throw new Error("cjk_font_not_found");
+  if (!fontObj) throw new Error("jp_font_not_found");
 
   const fontBytes = await fontObj.arrayBuffer();
 
-  // ★subset=true が超重要（使った文字だけ埋め込み→巨大フォントでも現実的）
-  const cjkFont = await pdf.embedFont(fontBytes, { subset: true });
+  // ★subset=true が重要：使った文字だけ埋め込む（フォント巨大でもOK）
+  const jpFont = await pdf.embedFont(fontBytes, { subset: true });
 
   const pages = pdf.getPages();
   const pageIndex = Math.max(0, Math.min(Number(cfg.page || 0), pages.length - 1));
@@ -1600,22 +1600,22 @@ async function generateReceiptPdf(env, { name, year, amount, date }) {
 
   page.drawText(String(name ?? ""), {
     x: Number(cfg.name_x), y: Number(cfg.name_y),
-    size, font: cjkFont, color: rgb(0, 0, 0)
+    size, font: jpFont, color: rgb(0, 0, 0)
   });
 
   page.drawText(String(year ?? ""), {
     x: Number(cfg.year_x), y: Number(cfg.year_y),
-    size, font: cjkFont, color: rgb(0, 0, 0)
+    size, font: jpFont, color: rgb(0, 0, 0)
   });
 
   page.drawText(String(amount ?? ""), {
     x: Number(cfg.amount_x), y: Number(cfg.amount_y),
-    size, font: cjkFont, color: rgb(0, 0, 0)
+    size, font: jpFont, color: rgb(0, 0, 0)
   });
 
   page.drawText(String(date ?? ""), {
     x: Number(cfg.date_x), y: Number(cfg.date_y),
-    size, font: cjkFont, color: rgb(0, 0, 0)
+    size, font: jpFont, color: rgb(0, 0, 0)
   });
 
   return await pdf.save();
