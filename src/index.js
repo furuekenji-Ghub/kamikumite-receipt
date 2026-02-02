@@ -1492,6 +1492,70 @@ async function hubspotPatchContactByIdProperty(env, idValue, idProperty, propert
   });
 }
 
+/* ===================== PDF (required) ===================== */
+
+async function getTemplateConfig(env) {
+  // あればDBから、なければデフォルト座標
+  try {
+    const row = await env.RECEIPTS_DB.prepare(
+      "SELECT page,name_x,name_y,year_x,year_y,amount_x,amount_y,date_x,date_y,font_size FROM receipt_template_config WHERE id=1"
+    ).first();
+
+    if (row) return row;
+  } catch {}
+
+  // fallback（あなたのテンプレに合わせて後で調整可）
+  return {
+    page: 0,
+    name_x: 152, name_y: 650,
+    year_x: 450, year_y: 650,
+    amount_x: 410, amount_y: 548,
+    date_x: 450, date_y: 520,
+    font_size: 12
+  };
+}
+
+async function generateReceiptPdf(env, { name, year, amount, date }) {
+  const obj = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
+  if (!obj) throw new Error("template_not_found");
+
+  const cfg = await getTemplateConfig(env);
+
+  const pdf = await PDFDocument.load(await obj.arrayBuffer());
+  const pages = pdf.getPages();
+  const pageIndex = Math.max(0, Math.min(Number(cfg.page || 0), pages.length - 1));
+  const page = pages[pageIndex];
+
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const size = Number(cfg.font_size || 12);
+
+  page.drawText(String(name ?? ""), {
+    x: Number(cfg.name_x), y: Number(cfg.name_y),
+    size, font, color: rgb(0, 0, 0)
+  });
+
+  page.drawText(String(year ?? ""), {
+    x: Number(cfg.year_x), y: Number(cfg.year_y),
+    size, font, color: rgb(0, 0, 0)
+  });
+
+  page.drawText(String(amount ?? ""), {
+    x: Number(cfg.amount_x), y: Number(cfg.amount_y),
+    size, font, color: rgb(0, 0, 0)
+  });
+
+  page.drawText(String(date ?? ""), {
+    x: Number(cfg.date_x), y: Number(cfg.date_y),
+    size, font, color: rgb(0, 0, 0)
+  });
+
+  return await pdf.save();
+}
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 /* ===================== Resend / Mail (required) ===================== */
 
 async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
