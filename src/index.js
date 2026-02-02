@@ -698,6 +698,24 @@ function clampInt(v, min, max, def) {
   return Math.max(min, Math.min(max, n));
 }
 
+/* ===================== HubSpot (required) ===================== */
+
+function hsHeaders(env) {
+  const token = must(env.HUBSPOT_ACCESS_TOKEN, "Missing HUBSPOT_ACCESS_TOKEN");
+  return {
+    "authorization": `Bearer ${token}`,
+    "content-type": "application/json"
+  };
+}
+
+// GET contact by arbitrary idProperty (e.g. member_id)
+async function hubspotGetContactByIdProperty(env, idValue, idProperty, properties = []) {
+  const u = new URL(`https://api.hubapi.com/crm/v3/objects/contacts/${encodeURIComponent(String(idValue))}`);
+  u.searchParams.set("idProperty", String(idProperty));
+  if (properties.length) u.searchParams.set("properties", properties.join(","));
+  return fetch(u.toString(), { headers: hsHeaders(env) });
+}
+
 /* ===================== Resend / Mail (required) ===================== */
 
 async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
