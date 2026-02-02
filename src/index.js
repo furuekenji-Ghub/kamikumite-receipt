@@ -1232,6 +1232,54 @@ function memberPortalHtml() {
 </html>`;
 }
 
+async function upsertAnnual(env, row) {
+  const {
+    year,
+    member_id,
+    branch,
+    name,
+    amount_cents,
+    issue_date,
+    pdf_key,
+    status,
+    error
+  } = row;
+
+  await env.RECEIPTS_DB.prepare(`
+    INSERT INTO receipt_annual
+      (year, member_id, branch, name, amount_cents, issue_date, pdf_key, status, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(year, member_id)
+    DO UPDATE SET
+      branch = excluded.branch,
+      name = excluded.name,
+      amount_cents = excluded.amount_cents,
+      issue_date = excluded.issue_date,
+      pdf_key = excluded.pdf_key,
+      status = excluded.status,
+      error = excluded.error
+  `)
+    .bind(
+      year,
+      member_id,
+      branch,
+      name,
+      amount_cents,
+      issue_date,
+      pdf_key,
+      status,
+      error
+    )
+    .run();
+}
+
+async function getJob(env, job_id) {
+  return await env.RECEIPTS_DB
+    .prepare(`SELECT * FROM receipt_import_job WHERE job_id=?`)
+    .bind(job_id)
+    .first();
+}
+
 function normYear(v) {
   const n = parseInt(String(v ?? "").trim(), 10);
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : null;
