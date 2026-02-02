@@ -244,6 +244,44 @@ if (path === "/api/admin/receipt/email/job/continue" && request.method === "POST
           }
         }
 
+        // --- hubspot email debug ---
+if (path === "/api/admin/receipt/hubspot/email" && request.method === "GET") {
+  const member_id = String(url.searchParams.get("member_id") || "").trim();
+  if (!member_id) return json({ ok:false, error:"member_id_required" }, 400);
+
+  try {
+    const hs = await hubspotGetContactByIdProperty(
+      env,
+      member_id,
+      "member_id",
+      ["email","firstname","lastname"]
+    );
+
+    const status = hs.status;
+    const text = await hs.text().catch(() => "");
+    let email = "";
+
+    try {
+      const parsed = JSON.parse(text);
+      email = String(parsed?.properties?.email || "").trim().toLowerCase();
+    } catch {}
+
+    return json({
+      ok: true,
+      member_id,
+      hubspot_status: status,
+      email,
+      raw: text.slice(0, 500)
+    });
+  } catch (e) {
+    return json({
+      ok: false,
+      error: "hubspot_exception",
+      detail: String(e?.message || e)
+    }, 200);
+  }
+}
+
         // --- import/validate ---
         if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
           const csvText = await request.text();
