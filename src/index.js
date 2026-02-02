@@ -930,6 +930,21 @@ function memberPortalHtml() {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Receipt Portal</title>
   <style>
+  .form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+  .field {
+  display: flex;
+  flex-direction: column;
+}
+
+.field label {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+  
     :root{--b:#e5e7eb;--fg:#111827;--muted:#6b7280;--blue:#2563eb;--bg:#ffffff;}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:24px;color:var(--fg);background:#fff;line-height:1.6}
     .wrap{max-width:760px;margin:0 auto}
