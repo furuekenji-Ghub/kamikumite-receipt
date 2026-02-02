@@ -879,6 +879,14 @@ async function hubspotGetContactByIdProperty(env, idValue, idProperty, propertie
   return fetch(u.toString(), { headers: hsHeaders(env) });
 }
 
+// GET contact by email (idProperty=email)
+async function hubspotGetContactByEmail(env, email, properties = []) {
+  const u = new URL(`https://api.hubapi.com/crm/v3/objects/contacts/${encodeURIComponent(String(email))}`);
+  u.searchParams.set("idProperty", "email");
+  if (properties.length) u.searchParams.set("properties", properties.join(","));
+  return fetch(u.toString(), { headers: hsHeaders(env) });
+}
+
 /* ===================== Resend / Mail (required) ===================== */
 
 async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
