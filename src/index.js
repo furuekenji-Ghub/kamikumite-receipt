@@ -818,6 +818,30 @@ function html(body, status = 200) {
   });
 }
 
+function cors(allow, origin) {
+  // allow は固定の許可オリジン（PORTAL_ORIGIN）
+  // origin はリクエストの Origin（参考、ここでは allow を優先）
+  const o = String(allow || "").trim();
+  return {
+    "access-control-allow-origin": o || "*",
+    "access-control-allow-credentials": "true",
+    "access-control-allow-headers": "content-type",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "vary": "Origin",
+  };
+}
+
+function jsonC(obj, status, allow, origin) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      ...cors(allow, origin),
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function memberPortalHtml() {
   return `<!doctype html>
 <html lang="en">
