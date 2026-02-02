@@ -1585,7 +1585,7 @@ async function generateReceiptPdf(env, { name, year, amount, date }) {
   pdf.registerFontkit(fontkit);
 
   // ★R2から日本語フォント（可変TTF）を取得
-  const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-VariableFont_wght.ttf");
+  const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-Regular.otf");
   if (!fontObj) throw new Error("jp_font_not_found");
 
   const fontBytes = await fontObj.arrayBuffer();
