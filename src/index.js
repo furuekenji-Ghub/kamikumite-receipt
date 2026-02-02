@@ -293,6 +293,86 @@ if (path === "/api/admin/receipt/hubspot/email" && request.method === "GET") {
   }
 }
 
+        // --- email/send-one ---
+// UI Request URL: /api/admin/receipt/email/send-one
+// body: { member_id: "42333", year: 2025, dry_run?: boolean }
+if (path === "/api/admin/receipt/email/send-one" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const member_id = String(body?.member_id || "").trim();
+  const year = normYear(body?.year);
+  const dry_run = body?.dry_run === true;
+
+  if (!member_id || !year) {
+    return json({ ok: false, error: "member_id_and_year_required" }, 400);
+  }
+
+  const row = await env.RECEIPTS_DB
+    .prepare(`SELECT year, member_id, name, amount_cents, status, email FROM receipt_annual WHERE year=? AND member_id=?`)
+    .bind(year, member_id)
+    .first();
+
+  if (!row) return json({ ok: false, error: "row_not_found" }, 404);
+
+  if (String(row.status || "").toUpperCase() !== "DONE") {
+    return json({ ok: false, error: "not_done" }, 409);
+  }
+
+  // email: D1優先、無ければHubSpot
+  let email = String(row.email || "").trim().toLowerCase();
+  if (!email) {
+    try {
+      const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email"]);
+      if (hs && hs.ok) {
+        const p = (await hs.json()).properties || {};
+        email = String(p.email || "").trim().toLowerCase();
+      }
+    } catch {
+      email = "";
+    }
+  }
+
+  if (!email) {
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_annual
+      SET email_status='NEEDS_EMAIL', email_error='missing_email'
+      WHERE year=? AND member_id=?
+    `).bind(year, member_id).run();
+
+    return json({ ok: false, error: "missing_email", member_id, year }, 200);
+  }
+
+  if (dry_run) {
+    return json({ ok: true, dry_run: true, sent: false, member_id, year, to: email }, 200);
+  }
+
+  try {
+    await sendReceiptNoticeEmail(env, {
+      to: email,
+      name: row.name || "Member",
+      year: Number(row.year),
+      amount_cents: Number(row.amount_cents || 0),
+    });
+
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_annual
+      SET email=?, email_status='SENT', email_error=NULL, email_sent_at=datetime('now')
+      WHERE year=? AND member_id=?
+    `).bind(email, year, member_id).run();
+
+    return json({ ok: true, sent: true, member_id, year, to: email }, 200);
+  } catch (e) {
+    const msg = String(e?.message || e);
+
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_annual
+      SET email=?, email_status='FAILED', email_error=?
+      WHERE year=? AND member_id=?
+    `).bind(email, msg, year, member_id).run();
+
+    return json({ ok: true, sent: false, member_id, year, to: email, warning: msg }, 200);
+  }
+}
+
         // --- email/send-selected ---
 // UI Request URL: /api/admin/receipt/email/send-selected
 // body: { selections: [{ member_id, year }...], dry_run?: boolean }
