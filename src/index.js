@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 
 /**
  * Receipt Worker — CSV_IMPORT + PDFGEN + MAIL + REBUILD + VALIDATE
