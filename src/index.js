@@ -1481,6 +1481,17 @@ async function hubspotGetContactByEmail(env, email, properties = []) {
   return fetch(u.toString(), { headers: hsHeaders(env) });
 }
 
+// PATCH contact by arbitrary idProperty (e.g. member_id)
+async function hubspotPatchContactByIdProperty(env, idValue, idProperty, properties) {
+  const u = new URL(`https://api.hubapi.com/crm/v3/objects/contacts/${encodeURIComponent(String(idValue))}`);
+  u.searchParams.set("idProperty", String(idProperty));
+  return fetch(u.toString(), {
+    method: "PATCH",
+    headers: hsHeaders(env),
+    body: JSON.stringify({ properties: properties || {} }),
+  });
+}
+
 /* ===================== Resend / Mail (required) ===================== */
 
 async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
