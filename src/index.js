@@ -888,6 +888,25 @@ async function sha256Hex(s) {
     .join("");
 }
 
+function makeSession(env, payload) {
+  const secret = must(env.SESSION_SECRET || env.MAGICLINK_SECRET, "Missing SESSION_SECRET");
+  const bodyJson = JSON.stringify({ ...payload, ts: Date.now() });
+
+  const body = btoa(bodyJson)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+
+  // 簡易署名（同期で作れる形）
+  const sig = btoa(`${secret}:${body}`)
+    .slice(0, 32)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+
+  return `${body}.${sig}`;
+}
+
 function toBool(v) {
   if (v === true) return true;
   if (v === false) return false;
