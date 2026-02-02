@@ -1326,44 +1326,75 @@ function normEmail(v) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : "";
 }
 
+/**
+ * RFC4180-ish CSV parser
+ * - supports quoted fields with commas/newlines
+ * - supports escaped quotes ("")
+ * - returns rows as objects using header row
+ */
 function parseCsv(text) {
-  if (!text) return [];
+  const s = String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!s.trim()) return [];
 
-  const lines = text
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .filter(l => l.trim().length);
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
 
-  if (lines.length < 2) return [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
 
-  const headers = lines[0].split(",").map(h => h.trim());
+    if (inQuotes) {
+      if (c === '"') {
+        const next = s[i + 1];
+        if (next === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+      continue;
+    }
 
-  return lines.slice(1).map(line => {
-    const cols = line.split(",").map(c => c.trim());
-    const row = {};
-    headers.forEach((h, i) => {
-      row[h] = cols[i] ?? "";
-    });
-    return row;
-  });
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ",") { row.push(field); field = ""; continue; }
+    if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; continue; }
+
+    field += c;
+  }
+  row.push(field);
+  rows.push(row);
+
+  // drop empty trailing rows
+  const clean = rows.filter(r => r.some(v => String(v ?? "").trim() !== ""));
+  if (clean.length < 2) return [];
+
+  const header = clean[0].map(x => String(x ?? "").trim());
+  const out = [];
+
+  for (const cols of clean.slice(1)) {
+    const obj = {};
+    for (let i = 0; i < header.length; i++) {
+      obj[header[i]] = String(cols[i] ?? "").trim();
+    }
+    out.push(obj);
+  }
+  return out;
 }
 
 function parseMoneyToCents(v) {
   const raw = String(v ?? "").trim();
   if (!raw) return null;
 
-  // ()でマイナス表記対応
   const neg = raw.startsWith("(") && raw.endsWith(")");
   const s0 = neg ? raw.slice(1, -1) : raw;
 
-  // 通貨記号と空白を除去
   let s = s0.replace(/[\s$¥]/g, "");
-
-  // 千位区切りカンマ除去
   s = s.replace(/,/g, "");
 
-  // 数値として解釈
   const n = Number(s);
   if (!Number.isFinite(n)) return null;
 
