@@ -533,56 +533,97 @@ if (path === "/api/admin/receipt/email/send-selected" && request.method === "POS
 }
 
         // --- import/validate ---
-        if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
-          const csvText = await request.text();
-          const rows = parseCsv(csvText);
-          if (!rows.length) return json({ ok: false, error: "no_rows" }, 400);
+if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
+  try {
+    const ct = String(request.headers.get("content-type") || "").toLowerCase();
 
-          const errors = [];
-          const maxCheck = 1000;
-          const checkRows = rows.slice(0, maxCheck);
+    // CSV取得（text/csv と multipart 両対応）
+    let csvText = "";
+    if (ct.includes("multipart/form-data")) {
+      const fd = await request.formData();
+      const f = fd.get("file") || fd.get("csv") || fd.get("upload");
+      if (f && typeof f === "object" && "text" in f) {
+        csvText = await f.text();
+      } else {
+        return json({ ok:false, error:"csv_required", warning:"multipart_no_file" }, 200);
+      }
+    } else {
+      csvText = await request.text();
+    }
 
-          for (let i = 0; i < checkRows.length; i++) {
-            const r = checkRows[i];
-            const rowNo = i + 2;
+    csvText = String(csvText || "");
+    if (!csvText.trim()) {
+      return json({ ok:false, error:"no_rows", warning:"empty_csv" }, 200);
+    }
 
-            const member_id = String(r.member_id || "").trim();
-            const branch = String(r.branch || "").trim();
-            const cents = parseMoneyToCents(r.amount);
-            const year = normYear(r.year);
+    const rows = parseCsv(csvText);
+    if (!rows.length) {
+      return json({ ok:false, error:"no_rows", warning:"parseCsv_returned_empty" }, 200);
+    }
 
-            if (!member_id) { errors.push({ type: "MISSING_MEMBER_ID", row: rowNo }); continue; }
-            if (!branch) { errors.push({ type: "MISSING_BRANCH", row: rowNo, member_id }); continue; }
-            if (cents === null) { errors.push({ type: "INVALID_AMOUNT", row: rowNo, member_id }); continue; }
-            if (!year) { errors.push({ type: "INVALID_YEAR", row: rowNo, member_id }); continue; }
+    // 最大1000行、HubSpot照合は最大50件まで
+    const errors = [];
+    const warnings = [];
 
-            const hs = await hubspotGetContactByIdProperty(
-              env,
-              member_id,
-              "member_id",
-              ["email", "firstname", "lastname"]
-            );
-            if (hs.status === 404 || !hs.ok) {
-              errors.push({ type: "HUBSPOT_NOT_FOUND", row: rowNo, member_id });
-              continue;
-            }
+    const maxCheck = 1000;
+    const checkRows = rows.slice(0, maxCheck);
 
-            const p = (await hs.json()).properties || {};
-            if (!normEmail(p.email)) {
-              errors.push({
-                type: "MISSING_EMAIL",
-                row: rowNo,
-                member_id,
-                name: fmtName(p.firstname, p.lastname, p.email)
-              });
-            }
-          }
+    const maxHs = 50;
+    let hsCount = 0;
 
-          if (errors.length) {
-            return json({ ok: false, errors, checked_rows: checkRows.length, total_rows: rows.length });
-          }
-          return json({ ok: true, checked_rows: checkRows.length, total_rows: rows.length });
+    for (let i = 0; i < checkRows.length; i++) {
+      const r = checkRows[i];
+      const rowNo = i + 2;
+
+      const member_id = String(r.member_id || "").trim();
+      const branch = String(r.branch || "").trim();
+      const cents = parseMoneyToCents(r.amount);
+      const year = normYear(r.year);
+
+      if (!member_id) { errors.push({ type: "MISSING_MEMBER_ID", row: rowNo }); continue; }
+      if (!branch) { errors.push({ type: "MISSING_BRANCH", row: rowNo, member_id }); continue; }
+      if (cents === null) { errors.push({ type: "INVALID_AMOUNT", row: rowNo, member_id }); continue; }
+      if (!year) { errors.push({ type: "INVALID_YEAR", row: rowNo, member_id }); continue; }
+
+      // HubSpot照合：最大50件まで（残りは warning）
+      if (hsCount < maxHs) {
+        hsCount++;
+
+        const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email","firstname","lastname"]);
+        if (hs.status === 404 || !hs.ok) {
+          errors.push({ type: "HUBSPOT_NOT_FOUND", row: rowNo, member_id });
+          continue;
         }
+
+        const p = (await hs.json()).properties || {};
+        const email = normEmail(p.email);
+        if (!email) {
+          errors.push({ type: "MISSING_EMAIL", row: rowNo, member_id });
+        }
+      } else {
+        warnings.push({ type: "HUBSPOT_CHECK_SKIPPED", row: rowNo, member_id });
+      }
+    }
+
+    // validate は 500 を返さない（UIを止めない）
+    return json({
+      ok: errors.length === 0,
+      checked_rows: checkRows.length,
+      total_rows: rows.length,
+      hs_checked: hsCount,
+      errors,
+      warnings
+    }, 200);
+
+  } catch (e) {
+    // ここも 500 にしない
+    return json({
+      ok: false,
+      error: "validate_failed",
+      warning: String(e?.message || e)
+    }, 200);
+  }
+}
 
         // --- dashboard ---
         if (path === "/api/admin/receipt/dashboard" && request.method === "GET") {
