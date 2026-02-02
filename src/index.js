@@ -907,6 +907,40 @@ function makeSession(env, payload) {
   return `${body}.${sig}`;
 }
 
+function readCookie(cookieHeader, name) {
+  const m = String(cookieHeader || "").match(new RegExp("(^|;\\s*)" + name + "=([^;]+)"));
+  return m ? m[2] : "";
+}
+
+function verifySession(env, token) {
+  const secret = must(env.SESSION_SECRET || env.MAGICLINK_SECRET, "Missing SESSION_SECRET");
+  if (!token) return { ok: false };
+
+  const parts = String(token).split(".");
+  if (parts.length !== 2) return { ok: false };
+
+  const body = parts[0];
+  const sig = parts[1];
+
+  const expect = btoa(`${secret}:${body}`)
+    .slice(0, 32)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+
+  if (sig !== expect) return { ok: false };
+
+  try {
+    // base64url -> base64
+    const b64 = body.replaceAll("-", "+").replaceAll("_", "/");
+    const jsonStr = atob(b64);
+    const obj = JSON.parse(jsonStr);
+    return { ok: true, email: obj.email, member_id: obj.member_id };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function toBool(v) {
   if (v === true) return true;
   if (v === false) return false;
