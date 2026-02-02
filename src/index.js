@@ -198,6 +198,9 @@ if (path === "/api/admin/receipt/email/job/continue" && request.method === "POST
 
         // --- email/test ---
         if (path === "/api/admin/receipt/email/test" && request.method === "POST") {
+          if (String(env.EMAIL_TEST_ENABLED || "").toLowerCase() !== "true") {
+          return json({ ok: false, error: "not_found" }, 404);
+          }
           const body = await request.json().catch(() => null);
 
           const to = String(body?.to || "").trim().toLowerCase();
