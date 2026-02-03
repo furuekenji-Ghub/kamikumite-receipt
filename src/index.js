@@ -87,7 +87,7 @@ if (path === "/api/admin/receipt/import/start" && request.method === "POST") {
   } catch (e) {
     return json({ ok:false, error:"server_error", detail:String(e?.message || e) }, 500);
   }
-}  ,
+} 
   // =====================================================
   // Queue consumer (Workers Paid + Queues)
   // =====================================================
