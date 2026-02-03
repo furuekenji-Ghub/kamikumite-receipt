@@ -78,7 +78,37 @@ if (path === "/api/admin/receipt/import/start" && request.method === "POST") {
   } catch (e) {
     return json({ ok:false, error:"server_error", detail:String(e?.message || e) }, 500);
   }
-}
+}  ,
+  // =====================================================
+  // Queue consumer (Workers Paid + Queues)
+  // =====================================================
+  async queue(batch, env, ctx) {
+    for (const msg of batch.messages) {
+      try {
+        const body = msg.body || {};
+        const type = String(body.type || "");
+        const job_id = String(body.job_id || "").trim();
+
+        if (!job_id) { msg.ack(); continue; }
+
+        if (type === "parse_csv") {
+          await handleParseCsv(env, job_id);
+          msg.ack();
+          continue;
+        }
+
+        if (type === "process_rows") {
+          await handleProcessRows(env, job_id);
+          msg.ack();
+          continue;
+        }
+
+        msg.ack();
+      } catch (e) {
+        msg.retry();
+      }
+    }
+  }
 
 // GET /api/admin/receipt/import/status?job_id=...
 if (path === "/api/admin/receipt/import/status" && request.method === "GET") {
@@ -99,6 +129,86 @@ if (path === "/api/admin/receipt/import/status" && request.method === "GET") {
             build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3_CSV_QUOTES_OK"
           });
         }
+
+// =====================================================
+// IMPORT (Queues) START / STATUS
+// =====================================================
+
+// POST /api/admin/receipt/import/start
+// 役割：CSVをR2に保存 → job作成 → Queueにparse_csv投入（ここでは処理しない）
+if (path === "/api/admin/receipt/import/start" && request.method === "POST") {
+  try {
+    const ct = String(request.headers.get("content-type") || "").toLowerCase();
+
+    // CSV取得（multipart と text/csv 両対応）
+    let csvText = "";
+    if (ct.includes("multipart/form-data")) {
+      const fd = await request.formData();
+      const f = fd.get("file") || fd.get("csv") || fd.get("upload");
+      if (f && typeof f === "object" && "text" in f) {
+        csvText = await f.text();
+      } else {
+        return json({ ok:false, error:"csv_required" }, 400);
+      }
+    } else {
+      csvText = await request.text();
+    }
+
+    csvText = String(csvText || "");
+    if (!csvText.trim()) return json({ ok:false, error:"empty_csv" }, 400);
+
+    const job_id = crypto.randomUUID();
+
+    // 年は先頭数行から拾う（拾えなければ前年）
+    let year = (new Date()).getFullYear() - 1;
+    try {
+      const head = csvText.split(/\r\n|\n|\r/).slice(0, 10).join("\n");
+      const headRows = parseCsv(head);
+      const y = normYear(headRows?.[0]?.year);
+      if (y) year = y;
+    } catch {}
+
+    const csv_key = `uploads/${job_id}.csv`;
+
+    // 1) R2へ保存
+    await env.RECEIPTS_BUCKET.put(csv_key, csvText, {
+      httpMetadata: { contentType: "text/csv" }
+    });
+
+    // 2) job作成（total_rows は parse_csv 後に確定）
+    await env.RECEIPTS_DB.prepare(`
+      INSERT INTO receipt_import_job
+        (job_id, year, total_rows, processed_rows, ok_rows, ng_rows, next_index, status, created_at, updated_at, csv_key, phase, last_error)
+      VALUES
+        (?, ?, 0, 0, 0, 0, 0, 'RUNNING', datetime('now'), datetime('now'), ?, 'PARSING', NULL)
+    `).bind(job_id, year, csv_key).run();
+
+    // 3) Queueへ投入（parse_csv）
+    // ※ env.IMPORT_Q は Bindings と wrangler.toml で有効化済みの前提
+    await env.IMPORT_Q.send({ type: "parse_csv", job_id });
+
+    return json({ ok:true, job_id, year, status:"RUNNING" }, 200);
+
+  } catch (e) {
+    return json({ ok:false, error:"server_error", detail:String(e?.message || e) }, 500);
+  }
+}
+
+// GET /api/admin/receipt/import/status?job_id=...
+// 役割：UIが進捗をポーリングするためにjobを返す
+if (path === "/api/admin/receipt/import/status" && request.method === "GET") {
+  const job_id = String(url.searchParams.get("job_id") || "").trim();
+  if (!job_id) return json({ ok:false, error:"job_id_required" }, 400);
+
+  const job = await env.RECEIPTS_DB
+    .prepare(`SELECT * FROM receipt_import_job WHERE job_id=?`)
+    .bind(job_id)
+    .first();
+
+  if (!job) return json({ ok:false, error:"job_not_found" }, 404);
+
+  return json({ ok:true, job }, 200);
+}
 
 // =====================================================
 // Email Bulk Job (START / STATUS / CONTINUE)
