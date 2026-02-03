@@ -2,35 +2,38 @@ name = "kamikumite-receipt"
 main = "src/index.js"
 compatibility_date = "2026-01-23"
 
-# R2
+# ======================
+# R2 Bucket
+# ======================
 [[r2_buckets]]
 binding = "RECEIPTS_BUCKET"
 bucket_name = "wdl-receipts"
 
+# ======================
 # KV (OTP)
+# ======================
 [[kv_namespaces]]
 binding = "OTP_KV"
 id = "875836f2f8ce43ae97833286cf2bd035"
 
-# D1 (template config)
+# ======================
+# D1 Database
+# ======================
 [[d1_databases]]
 binding = "RECEIPTS_DB"
 database_name = "wdl-receipts-db"
 database_id = "ef4aa4ff-56b4-43f2-b6b5-26bbbab4b568"
 
+# ======================
+# Queues (IMPORT)
+# ======================
+
+# Producer: API 側から Queue に投げる
 [[queues.producers]]
 binding = "IMPORT_Q"
 queue = "receipt-import-q"
 
-[[queues.consumers]]
-queue = "receipt-import-q"
-max_batch_size = 1
-max_batch_timeout = 30
-
-[[queues.producers]]
-binding = "IMPORT_Q"
-queue = "receipt-import-q"
-
+# Consumer: Worker が Queue を処理する
 [[queues.consumers]]
 queue = "receipt-import-q"
 max_batch_size = 1
