@@ -26,3 +26,12 @@ queue = "receipt-import-q"
 queue = "receipt-import-q"
 max_batch_size = 1
 max_batch_timeout = 30
+
+[[queues.producers]]
+binding = "IMPORT_Q"
+queue = "receipt-import-q"
+
+[[queues.consumers]]
+queue = "receipt-import-q"
+max_batch_size = 1
+max_batch_timeout = 30
