@@ -328,7 +328,37 @@ export default {
             headers: { "content-type": "application/pdf", "cache-control": "no-store", "content-disposition": "inline" },
           });
         }
+        
+        // --- bulk-delete-year ---
+// body: { year: 2025, confirm: "DELETE 2025" }
+if (path === "/api/admin/receipt/bulk-delete-year" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const year = normYear(body?.year);
+  const confirm = String(body?.confirm || "").trim();
 
+  const allowedYear = (new Date()).getFullYear() - 1;
+  if (!year) return json({ ok:false, error:"year_required" }, 400);
+  if (year !== allowedYear) return json({ ok:false, error:"year_not_allowed", allowedYear }, 403);
+
+  const required = `DELETE ${year}`;
+  if (confirm !== required) return json({ ok:false, error:"typed_confirmation_required", required }, 400);
+
+  // PDF keys
+  const rows = await env.RECEIPTS_DB.prepare(`SELECT pdf_key FROM receipt_annual WHERE year=?`).bind(year).all();
+  const keys = (rows?.results || []).map(r => String(r.pdf_key || "").trim()).filter(Boolean);
+
+  // DB delete
+  await env.RECEIPTS_DB.prepare(`DELETE FROM receipt_annual WHERE year=?`).bind(year).run();
+
+  // R2 delete
+  let deleted_pdf = 0;
+  for (const k of keys) {
+    try { await env.RECEIPTS_BUCKET.delete(k); deleted_pdf++; } catch {}
+  }
+
+  return json({ ok:true, year, deleted_rows: keys.length, deleted_pdf }, 200);
+}
+        
         // --- delete-selected (single + multi) ---
         if (path === "/api/admin/receipt/delete-selected" && request.method === "POST") {
           const body = await request.json().catch(() => null);
