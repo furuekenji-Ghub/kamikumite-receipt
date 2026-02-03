@@ -1640,25 +1640,48 @@ async function getTemplateConfig(env) {
   };
 }
 
+// ===== PDF caches (global) =====
+// ※同名がすでにある場合は、この2行は重複になるので「片方だけ残す」
+let _tmplCache = null; // ArrayBuffer
+let _fontCache = null; // ArrayBuffer
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// 右寄せ描画（年・金額・日付の“文字が散る”対策として安全）
+function drawRight(page, font, size, text, xRight, y) {
+  const t = String(text ?? "");
+  const w = font.widthOfTextAtSize(t, size);
+  page.drawText(t, { x: Number(xRight) - w, y: Number(y), size, font, color: rgb(0, 0, 0) });
+}
+
 async function generateReceiptPdf(env, { name, year, amount, date }) {
-  const templateObj = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
-  if (!templateObj) throw new Error("template_not_found");
+  // 1) テンプレPDFとフォントは初回だけR2から取得（以後キャッシュ）
+  if (!_tmplCache) {
+    const t = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
+    if (!t) throw new Error("template_not_found");
+    _tmplCache = await t.arrayBuffer();
+  }
 
-  const cfg = await getTemplateConfig(env);
+  if (!_fontCache) {
+    // ★あなたがR2にアップしたパスに合わせて完全一致
+    const f = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-Regular.otf");
+    if (!f) throw new Error("jp_font_not_found");
+    _fontCache = await f.arrayBuffer();
+  }
 
-  const pdf = await PDFDocument.load(await templateObj.arrayBuffer());
+  // 2) pdf-libは内部でバッファを参照/加工することがあるのでコピーして渡す
+  const pdf = await PDFDocument.load(_tmplCache.slice(0));
 
   // ★必須：fontkit登録（CJKフォント埋め込みに必要）
   pdf.registerFontkit(fontkit);
 
-  // ★R2から日本語フォント（可変TTF）を取得
-  const fontObj = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-Regular.otf");
-  if (!fontObj) throw new Error("jp_font_not_found");
+  // 3) フォント埋め込み（subset=true：使った文字だけ埋め込み）
+  const jpFont = await pdf.embedFont(_fontCache, { subset: true });
 
-  const fontBytes = await fontObj.arrayBuffer();
-
-  // ★subset=true が重要：使った文字だけ埋め込む（フォント巨大でもOK）
-  const jpFont = await pdf.embedFont(fontBytes, { subset: true });
+  // 4) 位置設定
+  const cfg = await getTemplateConfig(env);
 
   const pages = pdf.getPages();
   const pageIndex = Math.max(0, Math.min(Number(cfg.page || 0), pages.length - 1));
@@ -1666,25 +1689,17 @@ async function generateReceiptPdf(env, { name, year, amount, date }) {
 
   const size = Number(cfg.font_size || 12);
 
+  // 5) 描画
+  // 名前は左寄せ
   page.drawText(String(name ?? ""), {
     x: Number(cfg.name_x), y: Number(cfg.name_y),
     size, font: jpFont, color: rgb(0, 0, 0)
   });
 
-  page.drawText(String(year ?? ""), {
-    x: Number(cfg.year_x), y: Number(cfg.year_y),
-    size, font: jpFont, color: rgb(0, 0, 0)
-  });
-
-  page.drawText(String(amount ?? ""), {
-    x: Number(cfg.amount_x), y: Number(cfg.amount_y),
-    size, font: jpFont, color: rgb(0, 0, 0)
-  });
-
-  page.drawText(String(date ?? ""), {
-    x: Number(cfg.date_x), y: Number(cfg.date_y),
-    size, font: jpFont, color: rgb(0, 0, 0)
-  });
+  // 年・金額・日付は右寄せ（数字が散る/ズレるのを防ぐ）
+  drawRight(page, jpFont, size, String(year ?? ""),   Number(cfg.year_x),   Number(cfg.year_y));
+  drawRight(page, jpFont, size, String(amount ?? ""), Number(cfg.amount_x), Number(cfg.amount_y));
+  drawRight(page, jpFont, size, String(date ?? ""),   Number(cfg.date_x),   Number(cfg.date_y));
 
   return await pdf.save();
 }
