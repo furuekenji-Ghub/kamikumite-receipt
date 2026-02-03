@@ -411,6 +411,162 @@ if (path === "/api/admin/receipt/bulk-delete-year" && request.method === "POST")
           return json({ ok: true, deleted_ok, deleted_ng, results }, 200);
         }
 
+        // --- email/send-one ---
+// UI Request URL: /api/admin/receipt/email/send-one
+// body: { member_id: "42333", year: 2025, dry_run?: boolean }
+if (path === "/api/admin/receipt/email/send-one" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const member_id = String(body?.member_id || "").trim();
+  const year = normYear(body?.year);
+  const dry_run = body?.dry_run === true;
+
+  if (!member_id || !year) return json({ ok:false, error:"member_id_and_year_required" }, 400);
+
+  const row = await env.RECEIPTS_DB
+    .prepare(`SELECT year, member_id, name, amount_cents, status, email FROM receipt_annual WHERE year=? AND member_id=?`)
+    .bind(year, member_id)
+    .first();
+
+  if (!row) return json({ ok:false, error:"row_not_found" }, 404);
+  if (String(row.status || "").toUpperCase() !== "DONE") return json({ ok:false, error:"not_done" }, 409);
+
+  let email = String(row.email || "").trim().toLowerCase();
+
+  // D1に無ければ HubSpot から取得
+  if (!email) {
+    try {
+      const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email"]);
+      if (hs && hs.ok) {
+        const p = (await hs.json()).properties || {};
+        email = String(p.email || "").trim().toLowerCase();
+      }
+    } catch {}
+  }
+
+  if (!email) {
+    // NEEDS_EMAIL に落とす（後で missing list で直せる）
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_annual
+      SET email_status='NEEDS_EMAIL', email_error='missing_email'
+      WHERE year=? AND member_id=?
+    `).bind(year, member_id).run();
+
+    return json({ ok:false, error:"missing_email", member_id, year }, 200);
+  }
+
+  if (dry_run) return json({ ok:true, dry_run:true, sent:false, member_id, year, to: email }, 200);
+
+  try {
+    await sendReceiptNoticeEmail(env, {
+      to: email,
+      name: row.name || "Member",
+      year: Number(row.year),
+      amount_cents: Number(row.amount_cents || 0),
+    });
+
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_annual
+      SET email=?, email_status='SENT', email_error=NULL, email_sent_at=datetime('now')
+      WHERE year=? AND member_id=?
+    `).bind(email, year, member_id).run();
+
+    return json({ ok:true, sent:true, member_id, year, to: email }, 200);
+  } catch (e) {
+    const msg = String(e?.message || e);
+
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_annual
+      SET email=?, email_status='FAILED', email_error=?
+      WHERE year=? AND member_id=?
+    `).bind(email, msg, year, member_id).run();
+
+    return json({ ok:true, sent:false, member_id, year, to: email, warning: msg }, 200);
+  }
+}
+
+// --- delete-selected (single + multi) ---
+// UI Request URL: /api/admin/receipt/delete-selected
+// body: { selections:[{member_id,year}...] } または { member_id, year }
+if (path === "/api/admin/receipt/delete-selected" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+
+  let selections =
+    Array.isArray(body?.selections) ? body.selections :
+    Array.isArray(body?.selected) ? body.selected :
+    Array.isArray(body?.items) ? body.items :
+    [];
+
+  if (!selections.length) {
+    const member_id = String(body?.member_id || body?.memberId || "").trim();
+    const year = normYear(body?.year);
+    if (member_id && year) selections = [{ member_id, year }];
+  }
+
+  if (!selections.length) return json({ ok:false, error:"selections_required" }, 400);
+
+  let deleted_ok = 0, deleted_ng = 0;
+  const results = [];
+
+  for (const s of selections) {
+    const member_id = String(s?.member_id || s?.memberId || "").trim();
+    const year = normYear(s?.year);
+
+    if (!member_id || !year) {
+      deleted_ng++;
+      results.push({ ok:false, member_id, year, error:"member_id_and_year_required" });
+      continue;
+    }
+
+    const row = await env.RECEIPTS_DB
+      .prepare(`SELECT pdf_key FROM receipt_annual WHERE year=? AND member_id=?`)
+      .bind(year, member_id)
+      .first();
+
+    await env.RECEIPTS_DB
+      .prepare(`DELETE FROM receipt_annual WHERE year=? AND member_id=?`)
+      .bind(year, member_id)
+      .run();
+
+    const pdf_key = String(row?.pdf_key || "").trim();
+    if (pdf_key) {
+      try { await env.RECEIPTS_BUCKET.delete(pdf_key); } catch {}
+    }
+
+    deleted_ok++;
+    results.push({ ok:true, member_id, year, deleted_pdf_key: pdf_key || null });
+  }
+
+  return json({ ok:true, deleted_ok, deleted_ng, results }, 200);
+}
+
+// --- bulk-delete-year ---
+// UI Request URL: /api/admin/receipt/bulk-delete-year
+// body: { year: 2025, confirm: "DELETE 2025" }
+if (path === "/api/admin/receipt/bulk-delete-year" && request.method === "POST") {
+  const body = await request.json().catch(() => null);
+  const year = normYear(body?.year);
+  const confirm = String(body?.confirm || "").trim();
+
+  const allowedYear = (new Date()).getFullYear() - 1;
+  if (!year) return json({ ok:false, error:"year_required" }, 400);
+  if (year !== allowedYear) return json({ ok:false, error:"year_not_allowed", allowedYear }, 403);
+
+  const required = `DELETE ${year}`;
+  if (confirm !== required) return json({ ok:false, error:"typed_confirmation_required", required }, 400);
+
+  const rows = await env.RECEIPTS_DB.prepare(`SELECT pdf_key FROM receipt_annual WHERE year=?`).bind(year).all();
+  const keys = (rows?.results || []).map(r => String(r.pdf_key || "").trim()).filter(Boolean);
+
+  await env.RECEIPTS_DB.prepare(`DELETE FROM receipt_annual WHERE year=?`).bind(year).run();
+
+  let deleted_pdf = 0;
+  for (const k of keys) {
+    try { await env.RECEIPTS_BUCKET.delete(k); deleted_pdf++; } catch {}
+  }
+
+  return json({ ok:true, year, deleted_rows: keys.length, deleted_pdf }, 200);
+}
+
         // --- admin fallback ---
         return json({ ok: false, error: "not_found" }, 404);
       }
