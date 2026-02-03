@@ -12,6 +12,15 @@ export default {
     const host = url.hostname;
     const path = url.pathname;
 
+    // --- _version (always respond; for deploy verification) ---
+if (path === "/api/admin/receipt/_version") {
+  return json({
+    ok: true,
+    worker: "kamikumite-receipt",
+    build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3+QUEUES_v1"
+  }, 200);
+}
+
     try {
       /* =====================================================
        * MEMBER UI
