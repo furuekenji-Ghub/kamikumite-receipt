@@ -684,10 +684,13 @@ if (!email) {
           return json({ ok: true, job_id, year, total_rows: rows.length });
         }
 
-        // --- import/continue ---
+　// --- import/continue ---
 if (path === "/api/admin/receipt/import/continue" && request.method === "POST") {
   const job_id = String(url.searchParams.get("job_id") || "").trim();
-  const batch = clampInt(url.searchParams.get("batch"), 1, 200, 50);
+
+  // batch: UIから来る値を尊重するが、安全のため上限を小さめにする
+  const batch = clampInt(url.searchParams.get("batch"), 1, 50, 5);
+
   if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
 
   const job = await getJob(env, job_id);
@@ -697,20 +700,29 @@ if (path === "/api/admin/receipt/import/continue" && request.method === "POST") 
   if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
 
   const rows = parseCsv(await csvObj.text());
-  const start = Number(job.next_index || 0);
 
-  // --- HubSpot subrequest safety ---
-  const HS_LIMIT = 40; // 1回のcontinueでHubSpotを叩く上限（安全側）
+  const start = Number(job.next_index || 0);
+  const targetEnd = Math.min(rows.length, start + batch);
+
+  // ---------- Guards ----------
+  // HubSpot subrequest safety (GET+PATCH含む)
+  const HS_LIMIT = 35; // 1回のcontinueでHubSpotを叩く上限（安全側）
   let hsUsed = 0;
+
+  // Time guard（リソース上限で落とされる前に、自分から返す）
+  const t0 = Date.now();
+  const TIME_LIMIT_MS = 1800; // 1.8秒で自分から終了（安全側）
+
+  // member_idごとにHubSpot結果をキャッシュ（同一IDの重複GETを消す）
   const hsCache = new Map(); // member_id -> { ok, email, firstname, lastname, yearsStr }
 
   let ok = 0, ng = 0;
-  let processed = 0; // 実際に処理した行数（breakした場合にendより小さくなる）
-
-  // batch は「最大処理行数」。ただしHubSpot上限で途中breakする
-  const targetEnd = Math.min(rows.length, start + batch);
+  let processed = 0;
 
   for (let i = start; i < targetEnd; i++) {
+    // ① 時間上限で安全に終了（次回continueで再開）
+    if (Date.now() - t0 > TIME_LIMIT_MS) break;
+
     const r = rows[i];
     processed++;
 
@@ -735,13 +747,12 @@ if (path === "/api/admin/receipt/import/continue" && request.method === "POST") 
       continue;
     }
 
-    // --- HubSpot lookup (cached + limited) ---
+    // ② HubSpot GET（キャッシュ＋上限）
     let hsData = hsCache.get(member_id);
-
     if (!hsData) {
       if (hsUsed >= HS_LIMIT) {
-        // HubSpot上限に到達 → ここで安全に打ち切り（次回continueで再開）
-        processed--; // この行は未処理扱いに戻す
+        // HubSpot上限に達した → この行は未処理に戻して終了
+        processed--;
         break;
       }
       hsUsed++;
@@ -788,7 +799,7 @@ if (path === "/api/admin/receipt/import/continue" && request.method === "POST") 
     const name = fmtName(hsData.firstname, hsData.lastname, email);
 
     if (!email) {
-      // ここでは止めない：NEEDS_EMAIL として一覧に出す（後で set-email）
+      // Email未登録は止めない：後で missing list で対応
       ng++;
       await upsertAnnual(env, {
         year,
@@ -804,12 +815,11 @@ if (path === "/api/admin/receipt/import/continue" && request.method === "POST") 
       continue;
     }
 
-    // receipt_years_available 更新（これもHubSpot PATCH＝subrequest）
-    // patch も subrequest なので、ここも上限チェックして安全にスキップする
+    // ③ HubSpot PATCH（上限内なら実行。超えたらスキップ）
     const years = parseYears(hsData.yearsStr);
     if (!years.includes(String(year))) years.push(String(year));
 
-    if (hsUsed < HS_LIMIT) {
+    if (hsUsed < HS_LIMIT && (Date.now() - t0) <= TIME_LIMIT_MS) {
       hsUsed++;
       try {
         await hubspotPatchContactByIdProperty(env, member_id, "member_id", {
@@ -817,14 +827,13 @@ if (path === "/api/admin/receipt/import/continue" && request.method === "POST") 
           receipt_years_available: years.join(";")
         });
       } catch {
-        // patch失敗でも import 自体は続行（後で再実行可能）
+        // PATCH失敗しても import 自体は続行
       }
-    } else {
-      // patchをスキップ（次回 continue のどこかでまた試行される）
     }
 
-    // PDF生成（漢字/中文対応フォント版が入っている前提）
+    // ④ PDF生成（フォントキャッシュ版が入っている前提）
     const pdf_key = `receipts/${member_id}/${year}.pdf`;
+
     const pdf = await generateReceiptPdf(env, {
       name,
       year: String(year),
@@ -850,6 +859,33 @@ if (path === "/api/admin/receipt/import/continue" && request.method === "POST") 
 
     ok++;
   }
+
+  // 実際に進んだ next_index（processed 分だけ）
+  const next_index = start + processed;
+  const done = next_index >= rows.length;
+
+  // job更新：進捗は next_index を基準に保存
+  await env.RECEIPTS_DB.prepare(`
+    UPDATE receipt_import_job
+    SET processed_rows=?,
+        ok_rows=ok_rows+?,
+        ng_rows=ng_rows+?,
+        next_index=?,
+        status=CASE WHEN ?>=total_rows THEN 'DONE' ELSE 'RUNNING' END,
+        updated_at=datetime('now')
+    WHERE job_id=?
+  `).bind(next_index, ok, ng, next_index, next_index, job_id).run();
+
+  const updated = await getJob(env, job_id);
+
+  return json({
+    ok: true,
+    job: updated,
+    done: updated?.status === "DONE" || done,
+    hubspot: { hs_limit: HS_LIMIT, hs_used: hsUsed, cache_size: hsCache.size },
+    batch: { start, end: next_index, processed, ok, ng, time_ms: Date.now() - t0 }
+  });
+}
 
   const next_index = start + processed;
   const done = next_index >= rows.length;
