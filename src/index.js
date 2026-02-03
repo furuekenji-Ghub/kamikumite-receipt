@@ -126,7 +126,7 @@ if (path === "/api/admin/receipt/import/status" && request.method === "GET") {
           return json({
             ok: true,
             worker: "kamikumite-receipt",
-            build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3_CSV_QUOTES_OK"
+              build: "CSV_IMPORT+PDFGEN+MAIL+REBUILD+VALIDATE_v3+QUEUES_v1"
           });
         }
 
