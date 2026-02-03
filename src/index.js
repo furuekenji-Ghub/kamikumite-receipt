@@ -685,130 +685,196 @@ if (!email) {
         }
 
         // --- import/continue ---
-        if (path === "/api/admin/receipt/import/continue" && request.method === "POST") {
-          const job_id = String(url.searchParams.get("job_id") || "").trim();
-          const batch = clampInt(url.searchParams.get("batch"), 1, 200, 50);
-          if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
+if (path === "/api/admin/receipt/import/continue" && request.method === "POST") {
+  const job_id = String(url.searchParams.get("job_id") || "").trim();
+  const batch = clampInt(url.searchParams.get("batch"), 1, 200, 50);
+  if (!job_id) return json({ ok: false, error: "job_id_required" }, 400);
 
-          const job = await getJob(env, job_id);
-          if (!job) return json({ ok: false, error: "job_not_found" }, 404);
+  const job = await getJob(env, job_id);
+  if (!job) return json({ ok: false, error: "job_not_found" }, 404);
 
-          const csvObj = await env.RECEIPTS_BUCKET.get(`uploads/${job_id}.csv`);
-          if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
+  const csvObj = await env.RECEIPTS_BUCKET.get(`uploads/${job_id}.csv`);
+  if (!csvObj) return json({ ok: false, error: "uploaded_csv_not_found" }, 404);
 
-          const rows = parseCsv(await csvObj.text());
-          const start = Number(job.next_index || 0);
-          const end = Math.min(rows.length, start + batch);
+  const rows = parseCsv(await csvObj.text());
+  const start = Number(job.next_index || 0);
 
-          let ok = 0, ng = 0;
+  // --- HubSpot subrequest safety ---
+  const HS_LIMIT = 40; // 1回のcontinueでHubSpotを叩く上限（安全側）
+  let hsUsed = 0;
+  const hsCache = new Map(); // member_id -> { ok, email, firstname, lastname, yearsStr }
 
-          for (let i = start; i < end; i++) {
-            const r = rows[i];
-            const year = normYear(r.year) ?? job.year;
-            const cents = parseMoneyToCents(r.amount);
+  let ok = 0, ng = 0;
+  let processed = 0; // 実際に処理した行数（breakした場合にendより小さくなる）
 
-            if (!r.member_id || !r.branch || cents === null || !year) {
-              ng++;
-              await upsertAnnual(env, {
-                year: year || job.year,
-                member_id: r.member_id || "(missing)",
-                branch: r.branch || "(missing)",
-                name: "(invalid)",
-                amount_cents: 0,
-                issue_date: todayISO(),
-                pdf_key: "",
-                status: "ERROR",
-                error: "invalid_row"
-              });
-              continue;
-            }
+  // batch は「最大処理行数」。ただしHubSpot上限で途中breakする
+  const targetEnd = Math.min(rows.length, start + batch);
 
-            const hs = await hubspotGetContactByIdProperty(
-              env,
-              r.member_id,
-              "member_id",
-              ["firstname", "lastname", "email", "receipt_years_available"]
-            );
-            if (!hs.ok) {
-              ng++;
-              await upsertAnnual(env, {
-                year,
-                member_id: r.member_id,
-                branch: r.branch,
-                name: "(HubSpot not found)",
-                amount_cents: cents,
-                issue_date: todayISO(),
-                pdf_key: "",
-                status: "ERROR",
-                error: "hubspot_not_found"
-              });
-              continue;
-            }
+  for (let i = start; i < targetEnd; i++) {
+    const r = rows[i];
+    processed++;
 
-            const p = (await hs.json()).properties || {};
-            const email = normEmail(p.email);
-            if (!email) {
-              ng++;
-              await upsertAnnual(env, {
-                year,
-                member_id: r.member_id,
-                branch: r.branch,
-                name: fmtName(p.firstname, p.lastname, p.email),
-                amount_cents: cents,
-                issue_date: todayISO(),
-                pdf_key: "",
-                status: "ERROR",
-                error: "missing_email"
-              });
-              continue;
-            }
+    const year = normYear(r.year) ?? job.year;
+    const cents = parseMoneyToCents(r.amount);
+    const member_id = String(r.member_id || "").trim();
+    const branch = String(r.branch || "").trim();
 
-            const name = fmtName(p.firstname, p.lastname, p.email);
-            const years = parseYears(p.receipt_years_available);
-            if (!years.includes(String(year))) years.push(String(year));
+    if (!member_id || !branch || cents === null || !year) {
+      ng++;
+      await upsertAnnual(env, {
+        year: year || job.year,
+        member_id: member_id || "(missing)",
+        branch: branch || "(missing)",
+        name: "(invalid)",
+        amount_cents: 0,
+        issue_date: todayISO(),
+        pdf_key: "",
+        status: "ERROR",
+        error: "invalid_row"
+      });
+      continue;
+    }
 
-            await hubspotPatchContactByIdProperty(env, r.member_id, "member_id", {
-              receipt_portal_eligible: true,
-              receipt_years_available: years.join(";")
-            });
+    // --- HubSpot lookup (cached + limited) ---
+    let hsData = hsCache.get(member_id);
 
-            const pdf_key = `receipts/${r.member_id}/${year}.pdf`;
-            const pdf = await generateReceiptPdf(env, {
-              name,
-              year: String(year),
-              amount: (cents / 100).toFixed(2),
-              date: todayISO()
-            });
+    if (!hsData) {
+      if (hsUsed >= HS_LIMIT) {
+        // HubSpot上限に到達 → ここで安全に打ち切り（次回continueで再開）
+        processed--; // この行は未処理扱いに戻す
+        break;
+      }
+      hsUsed++;
 
-            await env.RECEIPTS_BUCKET.put(pdf_key, pdf, {
-              httpMetadata: { contentType: "application/pdf" }
-            });
+      const hs = await hubspotGetContactByIdProperty(
+        env,
+        member_id,
+        "member_id",
+        ["firstname", "lastname", "email", "receipt_years_available"]
+      );
 
-            await upsertAnnual(env, {
-              year,
-              member_id: r.member_id,
-              branch: r.branch,
-              name,
-              amount_cents: cents,
-              issue_date: todayISO(),
-              pdf_key,
-              status: "DONE",
-              error: null
-            });
-            ok++;
-          }
+      if (!hs.ok) {
+        hsData = { ok: false };
+      } else {
+        const p = (await hs.json()).properties || {};
+        hsData = {
+          ok: true,
+          email: normEmail(p.email),
+          firstname: String(p.firstname || ""),
+          lastname: String(p.lastname || ""),
+          yearsStr: String(p.receipt_years_available || "")
+        };
+      }
+      hsCache.set(member_id, hsData);
+    }
 
-          await env.RECEIPTS_DB.prepare(`
-            UPDATE receipt_import_job
-            SET processed_rows=?, ok_rows=ok_rows+?, ng_rows=ng_rows+?, next_index=?,
-                status=CASE WHEN ?>=total_rows THEN 'DONE' ELSE 'RUNNING' END,
-                updated_at=datetime('now')
-            WHERE job_id=?
-          `).bind(end, ok, ng, end, end, job_id).run();
+    if (!hsData.ok) {
+      ng++;
+      await upsertAnnual(env, {
+        year,
+        member_id,
+        branch,
+        name: "(HubSpot not found)",
+        amount_cents: cents,
+        issue_date: todayISO(),
+        pdf_key: "",
+        status: "ERROR",
+        error: "hubspot_not_found"
+      });
+      continue;
+    }
 
-          const updated = await getJob(env, job_id);
-          return json({ ok: true, job: updated, done: updated.status === "DONE", batch: { start, end, ok, ng } });
-        }
+    const email = hsData.email;
+    const name = fmtName(hsData.firstname, hsData.lastname, email);
+
+    if (!email) {
+      // ここでは止めない：NEEDS_EMAIL として一覧に出す（後で set-email）
+      ng++;
+      await upsertAnnual(env, {
+        year,
+        member_id,
+        branch,
+        name,
+        amount_cents: cents,
+        issue_date: todayISO(),
+        pdf_key: "",
+        status: "ERROR",
+        error: "missing_email"
+      });
+      continue;
+    }
+
+    // receipt_years_available 更新（これもHubSpot PATCH＝subrequest）
+    // patch も subrequest なので、ここも上限チェックして安全にスキップする
+    const years = parseYears(hsData.yearsStr);
+    if (!years.includes(String(year))) years.push(String(year));
+
+    if (hsUsed < HS_LIMIT) {
+      hsUsed++;
+      try {
+        await hubspotPatchContactByIdProperty(env, member_id, "member_id", {
+          receipt_portal_eligible: true,
+          receipt_years_available: years.join(";")
+        });
+      } catch {
+        // patch失敗でも import 自体は続行（後で再実行可能）
+      }
+    } else {
+      // patchをスキップ（次回 continue のどこかでまた試行される）
+    }
+
+    // PDF生成（漢字/中文対応フォント版が入っている前提）
+    const pdf_key = `receipts/${member_id}/${year}.pdf`;
+    const pdf = await generateReceiptPdf(env, {
+      name,
+      year: String(year),
+      amount: (cents / 100).toFixed(2),
+      date: todayISO()
+    });
+
+    await env.RECEIPTS_BUCKET.put(pdf_key, pdf, {
+      httpMetadata: { contentType: "application/pdf" }
+    });
+
+    await upsertAnnual(env, {
+      year,
+      member_id,
+      branch,
+      name,
+      amount_cents: cents,
+      issue_date: todayISO(),
+      pdf_key,
+      status: "DONE",
+      error: null
+    });
+
+    ok++;
+  }
+
+  const next_index = start + processed;
+  const done = next_index >= rows.length;
+
+  await env.RECEIPTS_DB.prepare(`
+    UPDATE receipt_import_job
+    SET processed_rows=?,
+        ok_rows=ok_rows+?,
+        ng_rows=ng_rows+?,
+        next_index=?,
+        status=CASE WHEN ?>=total_rows THEN 'DONE' ELSE 'RUNNING' END,
+        updated_at=datetime('now')
+    WHERE job_id=?
+  `).bind(next_index, ok, ng, next_index, next_index, job_id).run();
+
+  const updated = await getJob(env, job_id);
+
+  return json({
+    ok: true,
+    job: updated,
+    done: updated.status === "DONE" || done,
+    hubspot: { hs_limit: HS_LIMIT, hs_used: hsUsed, cache_hits: hsCache.size },
+    batch: { start, end: next_index, processed, ok, ng }
+  });
+}
 
         // --- delete-selected ---
 // UI Request URL: /api/admin/receipt/delete-selected
