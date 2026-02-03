@@ -691,10 +691,21 @@ async function generateReceiptPdf(env, { name, year, amount, date }) {
 
   page.drawText(String(name ?? ""), { x: Number(cfg.name_x), y: Number(cfg.name_y), size, font: jpFont, color: rgb(0, 0, 0) });
 
-  drawRight(page, jpFont, size, String(year ?? ""), Number(cfg.year_x), Number(cfg.year_y));
-  drawRight(page, jpFont, size, String(amount ?? ""), Number(cfg.amount_x), Number(cfg.amount_y));
-  drawRight(page, jpFont, size, String(date ?? ""), Number(cfg.date_x), Number(cfg.date_y));
+　page.drawText(String(year ?? ""), {
+  x: Number(cfg.year_x), y: Number(cfg.year_y),
+  size, font: jpFont, color: rgb(0,0,0)
+});
 
+page.drawText(String(amount ?? ""), {
+  x: Number(cfg.amount_x), y: Number(cfg.amount_y),
+  size, font: jpFont, color: rgb(0,0,0)
+});
+
+page.drawText(String(date ?? ""), {
+  x: Number(cfg.date_x), y: Number(cfg.date_y),
+  size, font: jpFont, color: rgb(0,0,0)
+});
+  
   return await pdf.save();
 }
 
