@@ -25,7 +25,71 @@ export default {
        * ===================================================== */
       if (path.startsWith("/api/admin/receipt/")) {
 
-        
+        // =====================================================
+// IMPORT (Queues) START / STATUS
+// =====================================================
+
+// POST /api/admin/receipt/import/start
+if (path === "/api/admin/receipt/import/start" && request.method === "POST") {
+  try {
+    const ct = String(request.headers.get("content-type") || "").toLowerCase();
+
+    let csvText = "";
+    if (ct.includes("multipart/form-data")) {
+      const fd = await request.formData();
+      const f = fd.get("file") || fd.get("csv") || fd.get("upload");
+      if (f && typeof f === "object" && "text" in f) csvText = await f.text();
+      else return json({ ok:false, error:"csv_required" }, 400);
+    } else {
+      csvText = await request.text();
+    }
+
+    csvText = String(csvText || "");
+    if (!csvText.trim()) return json({ ok:false, error:"empty_csv" }, 400);
+
+    const job_id = crypto.randomUUID();
+
+    // 年はCSVの先頭から拾う（拾えなければ前年）
+    let year = (new Date()).getFullYear() - 1;
+    try {
+      const head = csvText.split(/\r\n|\n|\r/).slice(0, 5).join("\n");
+      const headRows = parseCsv(head);
+      const y = normYear(headRows?.[0]?.year);
+      if (y) year = y;
+    } catch {}
+
+    const csv_key = `uploads/${job_id}.csv`;
+
+    // 1) R2へ保存
+    await env.RECEIPTS_BUCKET.put(csv_key, csvText, { httpMetadata:{ contentType:"text/csv" } });
+
+    // 2) job作成（total_rows は parse_csv 後に確定）
+    await env.RECEIPTS_DB.prepare(`
+      INSERT INTO receipt_import_job
+        (job_id, year, total_rows, processed_rows, ok_rows, ng_rows, next_index, status, created_at, updated_at, csv_key, phase, last_error)
+      VALUES
+        (?, ?, 0, 0, 0, 0, 0, 'RUNNING', datetime('now'), datetime('now'), ?, 'PARSING', NULL)
+    `).bind(job_id, year, csv_key).run();
+
+    // 3) Queueへ投入（parse_csv）
+    await env.IMPORT_Q.send({ type:"parse_csv", job_id });
+
+    return json({ ok:true, job_id, year, status:"RUNNING" }, 200);
+  } catch (e) {
+    return json({ ok:false, error:"server_error", detail:String(e?.message || e) }, 500);
+  }
+}
+
+// GET /api/admin/receipt/import/status?job_id=...
+if (path === "/api/admin/receipt/import/status" && request.method === "GET") {
+  const job_id = String(url.searchParams.get("job_id") || "").trim();
+  if (!job_id) return json({ ok:false, error:"job_id_required" }, 400);
+
+  const job = await env.RECEIPTS_DB.prepare(`SELECT * FROM receipt_import_job WHERE job_id=?`).bind(job_id).first();
+  if (!job) return json({ ok:false, error:"job_not_found" }, 404);
+
+  return json({ ok:true, job }, 200);
+}
 
         // --- version ---
         if (path === "/api/admin/receipt/_version" && request.method === "GET") {
