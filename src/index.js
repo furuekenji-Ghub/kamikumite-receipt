@@ -533,7 +533,7 @@ if (path === "/api/admin/receipt/email/send-selected" && request.method === "POS
   return json({ ok: true, dry_run, targets: selections.length, sent_ok, sent_ng, results });
 }
 
-        // --- import/validate ---
+   // --- import/validate (ultra-light; no HubSpot; never 500) ---
 if (path === "/api/admin/receipt/import/validate" && request.method === "POST") {
   try {
     const ct = String(request.headers.get("content-type") || "").toLowerCase();
@@ -557,20 +557,20 @@ if (path === "/api/admin/receipt/import/validate" && request.method === "POST") 
       return json({ ok:false, error:"no_rows", warning:"empty_csv" }, 200);
     }
 
-    const rows = parseCsv(csvText);
+    // ★重要：validateでは重い全体パースを避ける（先頭のみ）
+    // 1200行分のテキストだけで十分（ヘッダ+最大1000行）
+    const headText = csvText.split(/\r\n|\n|\r/).slice(0, 1200).join("\n");
+
+    const rows = parseCsv(headText);
     if (!rows.length) {
       return json({ ok:false, error:"no_rows", warning:"parseCsv_returned_empty" }, 200);
     }
 
-    // 最大1000行、HubSpot照合は最大50件まで
     const errors = [];
     const warnings = [];
 
     const maxCheck = 1000;
     const checkRows = rows.slice(0, maxCheck);
-
-    const maxHs = 50;
-    let hsCount = 0;
 
     for (let i = 0; i < checkRows.length; i++) {
       const r = checkRows[i];
@@ -585,45 +585,22 @@ if (path === "/api/admin/receipt/import/validate" && request.method === "POST") 
       if (!branch) { errors.push({ type: "MISSING_BRANCH", row: rowNo, member_id }); continue; }
       if (cents === null) { errors.push({ type: "INVALID_AMOUNT", row: rowNo, member_id }); continue; }
       if (!year) { errors.push({ type: "INVALID_YEAR", row: rowNo, member_id }); continue; }
-
-      // HubSpot照合：最大50件まで（残りは warning）
-      if (hsCount < maxHs) {
-        hsCount++;
-
-        const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id", ["email","firstname","lastname"]);
-        if (hs.status === 404 || !hs.ok) {
-          errors.push({ type: "HUBSPOT_NOT_FOUND", row: rowNo, member_id });
-          continue;
-        }
-
-        const p = (await hs.json()).properties || {};
-        const email = normEmail(p.email);
-if (!email) {
-  // ★MISSING_EMAIL はエラーではなく警告にする（処理は続行）
-  warnings.push({ type: "MISSING_EMAIL", row: rowNo, member_id });
-}
-      } else {
-        warnings.push({ type: "HUBSPOT_CHECK_SKIPPED", row: rowNo, member_id });
-      }
     }
 
-    // validate は 500 を返さない（UIを止めない）
+    // validateではHubSpotチェックをしない（本処理で確定）
+    warnings.push({ type: "HUBSPOT_CHECK_SKIPPED_IN_VALIDATE" });
+
     return json({
       ok: errors.length === 0,
       checked_rows: checkRows.length,
-      total_rows: rows.length,
-      hs_checked: hsCount,
+      total_rows: rows.length,    // headText範囲内の行数
+      hs_checked: 0,
       errors,
       warnings
     }, 200);
 
   } catch (e) {
-    // ここも 500 にしない
-    return json({
-      ok: false,
-      error: "validate_failed",
-      warning: String(e?.message || e)
-    }, 200);
+    return json({ ok:false, error:"validate_failed", warning:String(e?.message || e) }, 200);
   }
 }
 
