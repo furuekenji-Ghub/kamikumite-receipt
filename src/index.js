@@ -598,9 +598,10 @@ if (path === "/api/admin/receipt/import/validate" && request.method === "POST") 
 
         const p = (await hs.json()).properties || {};
         const email = normEmail(p.email);
-        if (!email) {
-          errors.push({ type: "MISSING_EMAIL", row: rowNo, member_id });
-        }
+if (!email) {
+  // ★MISSING_EMAIL はエラーではなく警告にする（処理は続行）
+  warnings.push({ type: "MISSING_EMAIL", row: rowNo, member_id });
+}
       } else {
         warnings.push({ type: "HUBSPOT_CHECK_SKIPPED", row: rowNo, member_id });
       }
