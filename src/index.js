@@ -877,8 +877,6 @@ function otpHtml(code) {
 }
 
 // ===== PDF caches (global) =====
-let _tmplCache = null; // ArrayBuffer
-let _jpFontCache = null; // ArrayBuffer
 
 function fmtUsd(amountStr) {
   // "2345.00" -> "2,345.00"（"." "," を確実に含む）
