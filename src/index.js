@@ -894,69 +894,45 @@ function drawRight(page, font, size, text, xRight, y) {
   page.drawText(t, { x: Number(xRight) - w, y: Number(y), size, font, color: rgb(0, 0, 0) });
 }
 
-async function generateReceiptPdf(env, { name, year, amount_cents, date }) {
-  // 1) template + jp font cache（あなたの既存キャッシュを利用）
+async function generateReceiptPdf(env, { name, year, amount, date }) {
   if (!_tmplCache) {
     const t = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
     if (!t) throw new Error("template_not_found");
     _tmplCache = await t.arrayBuffer();
   }
-
   if (!_fontCache) {
-    const f = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-VariableFont_wght.ttf");
-    // ↑あなたが実際にアップしたファイル名に合わせてください
+    const f = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-Regular.otf");
     if (!f) throw new Error("jp_font_not_found");
     _fontCache = await f.arrayBuffer();
   }
 
-  // 2) pdf load
   const pdf = await PDFDocument.load(_tmplCache.slice(0));
-
-  // 3) fontkit + fonts
   pdf.registerFontkit(fontkit);
+  const jpFont = await pdf.embedFont(_fontCache, { subset: true });
 
-  const jpFont = await pdf.embedFont(_fontCache, { subset: true });       // 名前用（漢字OK）
-  const stdFont = await pdf.embedFont(StandardFonts.Helvetica);           // 数字・記号用（, . $ OK）
-
-  // 4) config + page
   const cfg = await getTemplateConfig(env);
   const pages = pdf.getPages();
   const pageIndex = Math.max(0, Math.min(Number(cfg.page || 0), pages.length - 1));
   const page = pages[pageIndex];
-
   const size = Number(cfg.font_size || 12);
 
-  // 5) 表示用テキスト（ASCII確定）
-  const yearText = String(year ?? "");
-  const dateText = String(date ?? "");
+  page.drawText(String(name ?? ""), { x: Number(cfg.name_x), y: Number(cfg.name_y), size, font: jpFont, color: rgb(0, 0, 0) });
 
-  const amountText = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(Number(amount_cents || 0) / 100);
+　page.drawText(String(year ?? ""), {
+  x: Number(cfg.year_x), y: Number(cfg.year_y),
+  size, font: jpFont, color: rgb(0,0,0)
+});
 
-  // 6) draw helper（右寄せ）
-  function drawRight(font, text, xRight, y) {
-    const t = String(text ?? "");
-    const w = font.widthOfTextAtSize(t, size);
-    page.drawText(t, { x: Number(xRight) - w, y: Number(y), size, font, color: rgb(0, 0, 0) });
-  }
+page.drawText(String(amount ?? ""), {
+  x: Number(cfg.amount_x), y: Number(cfg.amount_y),
+  size, font: jpFont, color: rgb(0,0,0)
+});
 
-  // 7) 描画
-  // 名前：jpFont
-  page.drawText(String(name ?? ""), {
-    x: Number(cfg.name_x),
-    y: Number(cfg.name_y),
-    size,
-    font: jpFont,
-    color: rgb(0, 0, 0),
-  });
-
-  // 年・金額・日付：stdFont（←ここが “, . $ が消える” 問題の確実な解決）
-  drawRight(stdFont, yearText,   cfg.year_x,   cfg.year_y);
-  drawRight(stdFont, amountText, cfg.amount_x, cfg.amount_y);
-  drawRight(stdFont, dateText,   cfg.date_x,   cfg.date_y);
-
+page.drawText(String(date ?? ""), {
+  x: Number(cfg.date_x), y: Number(cfg.date_y),
+  size, font: jpFont, color: rgb(0,0,0)
+});
+  
   return await pdf.save();
 }
 
@@ -1168,7 +1144,7 @@ async function handleProcessRows(env, job_id) {
     const pdf = await generateReceiptPdf(env, {
   name,
   year: String(year),
-  amount_cents: cents,
+  amount: (cents / 100).toFixed(2),
   date: todayISO()
 });
     await env.RECEIPTS_BUCKET.put(pdf_key, pdf, { httpMetadata: { contentType: "application/pdf" } });
