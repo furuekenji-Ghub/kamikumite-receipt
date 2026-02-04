@@ -1342,9 +1342,8 @@ function memberPortalHtml() {
       showMsg("A verification code has been sent to your email.\\nPlease check your inbox.");
       return;
     }
-    showMsg("We couldn’t find this email address in our records.\n\n" +
-        "Please enter the email address you used for your membership/donations.\n" +
-        "If you’re not sure which email is on file, please contact support.");
+    showMsg("We couldn’t find this email address in our records. Please enter the email address you used for your membership/donations. 
+    If you’re not sure which email is on file, please contact support.");
   });
 
   $("btnVerify").addEventListener("click", async () => {
