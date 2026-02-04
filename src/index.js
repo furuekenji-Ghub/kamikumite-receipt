@@ -876,16 +876,15 @@ function otpHtml(code) {
   </div>`;
 }
 
-/* ===================== PDF ===================== */
+// ===== PDF caches (global) =====
+let _tmplCache = null; // ArrayBuffer
+let _jpFontCache = null; // ArrayBuffer
 
-async function getTemplateConfig(env) {
-  try {
-    const row = await env.RECEIPTS_DB.prepare(
-      "SELECT page,name_x,name_y,year_x,year_y,amount_x,amount_y,date_x,date_y,font_size FROM receipt_template_config WHERE id=1"
-    ).first();
-    if (row) return row;
-  } catch {}
-  return { page: 0, name_x: 152, name_y: 650, year_x: 450, year_y: 650, amount_x: 410, amount_y: 548, date_x: 450, date_y: 520, font_size: 12 };
+function fmtUsd(amountStr) {
+  // "2345.00" -> "2,345.00"（"." "," を確実に含む）
+  const n = Number(amountStr);
+  if (!Number.isFinite(n)) return String(amountStr ?? "");
+  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function drawRight(page, font, size, text, xRight, y) {
@@ -894,68 +893,49 @@ function drawRight(page, font, size, text, xRight, y) {
   page.drawText(t, { x: Number(xRight) - w, y: Number(y), size, font, color: rgb(0, 0, 0) });
 }
 
-async function generateReceiptPdf(env, { name, year, amount_cents, date }) {
-  // 1) template + jp font cache（あなたの既存キャッシュを利用）
+async function generateReceiptPdf(env, { name, year, amount, date }) {
+  // 1) template cache
   if (!_tmplCache) {
     const t = await env.RECEIPTS_BUCKET.get("templates/receipt_template_v1.pdf");
     if (!t) throw new Error("template_not_found");
     _tmplCache = await t.arrayBuffer();
   }
 
-  if (!_fontCache) {
+  // 2) jp font cache（あなたの実ファイル名に合わせる）
+  if (!_jpFontCache) {
     const f = await env.RECEIPTS_BUCKET.get("templates/fonts/NotoSansJP-VariableFont_wght.ttf");
-    // ↑あなたが実際にアップしたファイル名に合わせてください
     if (!f) throw new Error("jp_font_not_found");
-    _fontCache = await f.arrayBuffer();
+    _jpFontCache = await f.arrayBuffer();
   }
 
-  // 2) pdf load
+  // 3) pdf load（必ずコピーして渡す）
   const pdf = await PDFDocument.load(_tmplCache.slice(0));
-
-  // 3) fontkit + fonts
   pdf.registerFontkit(fontkit);
 
-  const jpFont = await pdf.embedFont(_fontCache, { subset: true });       // 名前用（漢字OK）
-  const stdFont = await pdf.embedFont(StandardFonts.Helvetica);           // 数字・記号用（, . $ OK）
+  // 4) fonts
+  const jpFont = await pdf.embedFont(_jpFontCache, { subset: true });
+  const latinFont = await pdf.embedFont(StandardFonts.Helvetica);
 
-  // 4) config + page
   const cfg = await getTemplateConfig(env);
   const pages = pdf.getPages();
   const pageIndex = Math.max(0, Math.min(Number(cfg.page || 0), pages.length - 1));
   const page = pages[pageIndex];
-
   const size = Number(cfg.font_size || 12);
 
-  // 5) 表示用テキスト（ASCII確定）
-  const yearText = String(year ?? "");
-  const dateText = String(date ?? "");
-
-  const amountText = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(Number(amount_cents || 0) / 100);
-
-  // 6) draw helper（右寄せ）
-  function drawRight(font, text, xRight, y) {
-    const t = String(text ?? "");
-    const w = font.widthOfTextAtSize(t, size);
-    page.drawText(t, { x: Number(xRight) - w, y: Number(y), size, font, color: rgb(0, 0, 0) });
-  }
-
-  // 7) 描画
-  // 名前：jpFont
+  // 5) 名前：CJK（漢字/中文対応）
   page.drawText(String(name ?? ""), {
-    x: Number(cfg.name_x),
-    y: Number(cfg.name_y),
-    size,
-    font: jpFont,
-    color: rgb(0, 0, 0),
+    x: Number(cfg.name_x), y: Number(cfg.name_y),
+    size, font: jpFont, color: rgb(0, 0, 0)
   });
 
-  // 年・金額・日付：stdFont（←ここが “, . $ が消える” 問題の確実な解決）
-  drawRight(stdFont, yearText,   cfg.year_x,   cfg.year_y);
-  drawRight(stdFont, amountText, cfg.amount_x, cfg.amount_y);
-  drawRight(stdFont, dateText,   cfg.date_x,   cfg.date_y);
+  // 6) 年/金額/日付：Latin font（"." "," を確実に出す）
+  const yStr = String(year ?? "");
+  const amtStr = fmtUsd(String(amount ?? ""));
+  const dStr = String(date ?? "");
+
+  drawRight(page, latinFont, size, yStr,   Number(cfg.year_x),   Number(cfg.year_y));
+  drawRight(page, latinFont, size, amtStr, Number(cfg.amount_x), Number(cfg.amount_y));
+  drawRight(page, latinFont, size, dStr,   Number(cfg.date_x),   Number(cfg.date_y));
 
   return await pdf.save();
 }
