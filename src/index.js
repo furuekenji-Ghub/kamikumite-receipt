@@ -1262,6 +1262,7 @@ function memberPortalHtml() {
 </div>
 
 <script>
+(() => {
   const API = "https://api.kamikumite.worlddivinelight.org";
   const $ = (id) => document.getElementById(id);
 
