@@ -1027,10 +1027,11 @@ async function handleProcessRows(env, job_id) {
 
   if (!job) return;
 
+  const total = Number(job.total_rows || 0);
+
   // すでにDONEなら何もしない
   if (String(job.status || "").toUpperCase() === "DONE") return;
 
-  const total = Number(job.total_rows || 0);
   let next_index = Number(job.next_index || 0);
   if (!Number.isFinite(next_index)) next_index = 0;
 
