@@ -826,6 +826,47 @@ async function sendResend(env, { to, subject, html }) {
   if (!res.ok) throw new Error(`resend_failed: ${res.status} ${await res.text().catch(() => "")}`);
   return res;
 }
+
+// ===================== Receipt Notice Mail =====================
+// 管理画面（個別送信 / 一斉送信 / Queue）共通で使う
+async function sendReceiptNoticeEmail(env, { to, name, year, amount_cents }) {
+  const portal =
+    (env.PORTAL_ORIGIN || "https://kamikumite.worlddivinelight.org") + "/receipt/";
+
+  const subject = `Annual Donation Receipt (${year}) – World Divine Light`;
+  const amount = (Number(amount_cents || 0) / 100).toFixed(2);
+
+  const html = `
+  <div style="font-family:Arial,sans-serif;line-height:1.6">
+    <p>Dear ${escapeHtml(name || "Member")},</p>
+
+    <p>
+      This email is from World Divine Light regarding your Annual Donation Receipt.
+    </p>
+
+    <p>
+      Unless otherwise requested, the receipt reflects the total amount of donations
+      you made during the calendar year <b>${escapeHtml(String(year))}</b>.
+    </p>
+
+    <p><b>Total amount:</b> $${escapeHtml(amount)}</p>
+
+    <p>
+      Please download your receipt from the link below and use it as needed for your tax filing.
+    </p>
+
+    <p>
+      <a href="${portal}">${portal}</a>
+    </p>
+
+    <p>— World Divine Light</p>
+  </div>
+  `;
+
+  // ここが重要：実体は sendResend
+  return await sendResend(env, { to, subject, html });
+}
+
 function otpHtml(code) {
   return `<div style="font-family:Arial,sans-serif;line-height:1.6">
     <p>Your verification code is:</p>
