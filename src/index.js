@@ -1422,7 +1422,7 @@ function memberPortalHtml() {
 
   renderYears().catch(()=>{});
   })();
-</script>
+<\/script>
 </body>
 </html>`;
 }
