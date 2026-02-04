@@ -1232,27 +1232,7 @@ function memberPortalHtml() {
 <div class="wrap">
   <div class="card">
     <h1>Receipt Portal</h1>
-    <p>Please sign in with your email address and a one-time verification code.</p>
-    <p class="muted">If you arrived here from the receipt email, use the same email address you received it at.</p>
-
-    <div class="grid">
-      <div class="field">
-        <label>Email</label>
-        <input id="email" type="email" placeholder="you@example.com" autocomplete="email" />
-      </div>
-      <div class="field">
-        <label>Verification code</label>
-        <input id="code" type="text" inputmode="numeric" placeholder="6 digits" maxlength="6" />
-      </div>
-    </div>
-
-    <div class="row">
-      <button id="btnSend">Send code</button>
-      <button id="btnVerify" class="secondary">Verify</button>
-      <button id="btnRefresh" class="secondary" disabled>Refresh years</button>
-    </div>
-
-    <div id="msg" class="msg"></div>
+    <p>Download your receipt from the link below.</p>
 
     <div class="years">
       <div style="font-weight:800;margin-top:18px">Available receipts</div>
