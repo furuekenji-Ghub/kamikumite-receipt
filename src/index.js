@@ -1313,17 +1313,70 @@ function memberPortalHtml() {
   }
 
   $("btnSend").addEventListener("click", async () => {
-    clearMsg();
-    const email = ($("email").value || "").trim();
-    if (!email) return showMsg("Please enter your email.");
+  clearMsg();
+  const email = ($("email").value || "").trim();
 
-    const { r, data } = await postJson("/api/receipt/request-code", { email });
-    if (r.ok && data && data.ok) {
-      showMsg("A verification code has been sent to your email.\\nPlease check your inbox.");
-      return;
-    }
-    showMsg("Failed to send code:\\n" + JSON.stringify(data));
-  });
+  if (!email) {
+    return showMsg("Please enter your email address.");
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return showMsg(
+      "The email address format is invalid.\n" +
+      "Please enter a valid email address (e.g. name@example.com)."
+    );
+  }
+
+  const { r, data } = await postJson("/api/receipt/request-code", { email });
+
+  // Success
+  if (r.ok && data && data.ok) {
+    showMsg(
+      "A verification code has been sent to your email.\n" +
+      "Please enter the 6-digit code you received."
+    );
+    return;
+  }
+
+  // Friendly error handling
+  const err = (data && typeof data === "object") ? String(data.error || "") : "";
+
+  if (err === "not_registered") {
+    showMsg(
+      "This email address is not registered in our system.\n\n" +
+      "Please enter the same email address where you received the receipt notification.\n" +
+      "If you believe this is an error, please contact the administrator."
+    );
+    return;
+  }
+
+  if (err === "not_eligible") {
+    showMsg(
+      "This account is not eligible to access the receipt portal.\n" +
+      "Please contact the administrator if you believe this is a mistake."
+    );
+    return;
+  }
+
+  if (err === "not_ready") {
+    showMsg(
+      "Your receipt is not ready yet.\n" +
+      "Please try again later."
+    );
+    return;
+  }
+
+  if (err === "email_required") {
+    showMsg("Please enter your email address.");
+    return;
+  }
+
+  // Fallback (unexpected error)
+  showMsg(
+    "Failed to send the verification code.\n" +
+    "Please try again later."
+  );
+});
 
   $("btnVerify").addEventListener("click", async () => {
     clearMsg();
