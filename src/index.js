@@ -1308,7 +1308,7 @@ async function handleProcessRows(env, job_id) {
       WHERE job_id=?
     `).bind(total, total, job_id).run();
   }
-}
+
 
 
 /* ===================== Member UI HTML ===================== */
