@@ -1243,7 +1243,7 @@ async function handleProcessRows(env, job_id) {
     // ===== ここまで =====
   }
 
-  // 進捗更新（processed_rows / next_index）
+    // 進捗更新（processed_rows / next_index）
   const processed_rows = Math.min(total, maxRowIndex);
 
   await env.RECEIPTS_DB.prepare(`
@@ -1265,11 +1265,12 @@ async function handleProcessRows(env, job_id) {
   `).bind(job_id).first();
 
   const left = Number(pending?.n || 0);
+
   if (left > 0) {
-    // ✅ 次を自分でenqueue（自走）
+    // 次を自分でenqueue（自走）
     await env.IMPORT_Q.send({ type: "process_rows", job_id });
   } else {
-    // ✅ 完了
+    // 完了
     await env.RECEIPTS_DB.prepare(`
       UPDATE receipt_import_job
       SET status='DONE',
