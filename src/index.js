@@ -1144,7 +1144,7 @@ async function handleProcessRows(env, job_id) {
     const pdf = await generateReceiptPdf(env, {
   name,
   year: String(year),
-  amount: (cents / 100).toFixed(2),
+  amount_cents: cents,
   date: todayISO()
 });
     await env.RECEIPTS_BUCKET.put(pdf_key, pdf, { httpMetadata: { contentType: "application/pdf" } });
