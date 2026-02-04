@@ -1342,7 +1342,7 @@ function memberPortalHtml() {
       showMsg("A verification code has been sent to your email.\\nPlease check your inbox.");
       return;
     }
-    showMsg("Failed to send code:\\n" + JSON.stringify(data));
+    showMsg("Failed to send code");
   });
 
   $("btnVerify").addEventListener("click", async () => {
