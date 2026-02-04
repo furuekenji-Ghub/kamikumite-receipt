@@ -1420,6 +1420,7 @@ function memberPortalHtml() {
   });
 
   renderYears().catch(()=>{});
+  })();
 </script>
 </body>
 </html>`;
