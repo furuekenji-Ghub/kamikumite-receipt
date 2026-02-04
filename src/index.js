@@ -1022,17 +1022,24 @@ async function handleParseCsv(env, job_id) {
 }
 
 async function handleProcessRows(env, job_id) {
-  const job = await env.RECEIPTS_DB.prepare(`SELECT * FROM receipt_import_job WHERE job_id=?`).bind(job_id).first();
+  const job = await env.RECEIPTS_DB
+    .prepare(`SELECT * FROM receipt_import_job WHERE job_id=?`)
+    .bind(job_id)
+    .first();
+
   if (!job) return;
 
+  // すでにDONEなら何もしない
   if (String(job.status || "").toUpperCase() === "DONE") return;
 
   const total = Number(job.total_rows || 0);
   let next_index = Number(job.next_index || 0);
   if (!Number.isFinite(next_index)) next_index = 0;
 
-  // fetch next PENDING rows
+  // 1回で処理する行数（小さく保つ：止まらないコア）
   const BATCH = 3;
+
+  // next_index 以降の PENDING を拾う
   let rowsRes = await env.RECEIPTS_DB.prepare(`
     SELECT * FROM receipt_import_row
     WHERE job_id=? AND row_index>=? AND status='PENDING'
@@ -1042,16 +1049,23 @@ async function handleProcessRows(env, job_id) {
 
   let list = rowsRes.results || [];
 
+  // next_index以降にPENDINGが無いなら、全体の最小PENDINGへ寄せる（穴あき対策）
   if (!list.length) {
     const minPending = await env.RECEIPTS_DB.prepare(`
-      SELECT MIN(row_index) AS m FROM receipt_import_row
+      SELECT MIN(row_index) AS m
+      FROM receipt_import_row
       WHERE job_id=? AND status='PENDING'
     `).bind(job_id).first();
 
     const m = minPending?.m;
     if (m === null || m === undefined) {
+      // PENDINGが無い＝完了
       await env.RECEIPTS_DB.prepare(`
-        UPDATE receipt_import_job SET status='DONE', next_index=?, processed_rows=?, updated_at=datetime('now')
+        UPDATE receipt_import_job
+        SET status='DONE',
+            next_index=?,
+            processed_rows=?,
+            updated_at=datetime('now')
         WHERE job_id=?
       `).bind(total, total, job_id).run();
       return;
@@ -1064,14 +1078,17 @@ async function handleProcessRows(env, job_id) {
       ORDER BY row_index
       LIMIT ?
     `).bind(job_id, next_index, BATCH).all();
+
     list = rowsRes.results || [];
     if (!list.length) return;
   }
 
+  // time guard（consumerでも短く）
   const t0 = Date.now();
   const TIME_LIMIT_MS = 2500;
 
-  let ok = 0, ng = 0;
+  let ok = 0;
+  let ng = 0;
   let maxRowIndex = next_index;
 
   for (const r of list) {
@@ -1085,23 +1102,34 @@ async function handleProcessRows(env, job_id) {
     const cents = parseMoneyToCents(r.amount);
     const year = normYear(r.year) || Number(job.year);
 
+    // 入力不正
     if (!member_id || !branch || cents === null || !year) {
       ng++;
       await env.RECEIPTS_DB.prepare(`
-        UPDATE receipt_import_row SET status='ERROR', error='invalid_row', updated_at=datetime('now')
+        UPDATE receipt_import_row
+        SET status='ERROR',
+            error='invalid_row',
+            updated_at=datetime('now')
         WHERE job_id=? AND row_index=?
       `).bind(job_id, row_index).run();
       continue;
     }
 
-    const hs = await hubspotGetContactByIdProperty(env, member_id, "member_id",
-      ["email","firstname","lastname","receipt_years_available"]
+    // HubSpot lookup
+    const hs = await hubspotGetContactByIdProperty(
+      env,
+      member_id,
+      "member_id",
+      ["email", "firstname", "lastname", "receipt_years_available"]
     ).catch(() => null);
 
     if (!hs || !hs.ok) {
       ng++;
       await env.RECEIPTS_DB.prepare(`
-        UPDATE receipt_import_row SET status='ERROR', error='hubspot_not_found', updated_at=datetime('now')
+        UPDATE receipt_import_row
+        SET status='ERROR',
+            error='hubspot_not_found',
+            updated_at=datetime('now')
         WHERE job_id=? AND row_index=?
       `).bind(job_id, row_index).run();
       continue;
@@ -1111,6 +1139,7 @@ async function handleProcessRows(env, job_id) {
     const email = normEmail(p.email);
     const name = fmtName(p.firstname, p.lastname, email);
 
+    // Emailなし → NEEDS_EMAIL（止めない）
     if (!email) {
       ng++;
 
@@ -1127,14 +1156,17 @@ async function handleProcessRows(env, job_id) {
       });
 
       await env.RECEIPTS_DB.prepare(`
-        UPDATE receipt_import_row SET status='NEEDS_EMAIL', error='missing_email', updated_at=datetime('now')
+        UPDATE receipt_import_row
+        SET status='NEEDS_EMAIL',
+            error='missing_email',
+            updated_at=datetime('now')
         WHERE job_id=? AND row_index=?
       `).bind(job_id, row_index).run();
 
       continue;
     }
 
-    // patch (best effort)
+    // HubSpot PATCH（best effort）
     try {
       const years = parseYears(p.receipt_years_available);
       if (!years.includes(String(year))) years.push(String(year));
@@ -1144,34 +1176,112 @@ async function handleProcessRows(env, job_id) {
       });
     } catch {}
 
-    const pdf_key = `receipts/${member_id}/${year}.pdf`;
-    const pdf = await generateReceiptPdf(env, {
-  name,
-  year: String(year),
-  amount_cents: cents,
-  date: todayISO()
-});
-    await env.RECEIPTS_BUCKET.put(pdf_key, pdf, { httpMetadata: { contentType: "application/pdf" } });
+    // ===== ここからが「止めない」本体（必須）=====
+    try {
+      const pdf_key = `receipts/${member_id}/${year}.pdf`;
 
-    await upsertAnnual(env, {
-      year,
-      member_id,
-      branch,
-      name,
-      amount_cents: cents,
-      issue_date: todayISO(),
-      pdf_key,
-      status: "DONE",
-      error: null,
-    });
+      // ✅ generateReceiptPdf が期待する形に合わせる（amount_centsではなく amount文字列）
+      const pdf = await generateReceiptPdf(env, {
+        name,
+        year: String(year),
+        amount: (Number(cents) / 100).toFixed(2),
+        date: todayISO(),
+      });
 
-    await env.RECEIPTS_DB.prepare(`
-      UPDATE receipt_import_row SET status='DONE', email=?, pdf_key=?, updated_at=datetime('now')
-      WHERE job_id=? AND row_index=?
-    `).bind(email, pdf_key, job_id, row_index).run();
+      await env.RECEIPTS_BUCKET.put(pdf_key, pdf, {
+        httpMetadata: { contentType: "application/pdf" }
+      });
 
-    ok++;
+      await upsertAnnual(env, {
+        year,
+        member_id,
+        branch,
+        name,
+        amount_cents: cents,
+        issue_date: todayISO(),
+        pdf_key,
+        status: "DONE",
+        error: null,
+      });
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_import_row
+        SET status='DONE',
+            email=?,
+            pdf_key=?,
+            error=NULL,
+            updated_at=datetime('now')
+        WHERE job_id=? AND row_index=?
+      `).bind(email, pdf_key, job_id, row_index).run();
+
+      ok++;
+
+    } catch (e) {
+      // ✅ PDF失敗でも止めない：この行だけERRORにする
+      const msg = String(e?.message || e);
+      ng++;
+
+      await env.RECEIPTS_DB.prepare(`
+        UPDATE receipt_import_row
+        SET status='ERROR',
+            error=?,
+            updated_at=datetime('now')
+        WHERE job_id=? AND row_index=?
+      `).bind(`pdf_failed:${msg}`, job_id, row_index).run();
+
+      // annualにも残す（一覧で追える）
+      await upsertAnnual(env, {
+        year,
+        member_id,
+        branch,
+        name,
+        amount_cents: cents,
+        issue_date: todayISO(),
+        pdf_key: "",
+        status: "ERROR",
+        error: "pdf_failed",
+      });
+    }
+    // ===== ここまで =====
   }
+
+  // 進捗更新（processed_rows / next_index）
+  const processed_rows = Math.min(total, maxRowIndex);
+
+  await env.RECEIPTS_DB.prepare(`
+    UPDATE receipt_import_job
+    SET ok_rows=ok_rows+?,
+        ng_rows=ng_rows+?,
+        processed_rows=?,
+        next_index=?,
+        status='RUNNING',
+        updated_at=datetime('now')
+    WHERE job_id=?
+  `).bind(ok, ng, processed_rows, maxRowIndex, job_id).run();
+
+  // PENDINGが残っているか確認
+  const pending = await env.RECEIPTS_DB.prepare(`
+    SELECT COUNT(*) AS n
+    FROM receipt_import_row
+    WHERE job_id=? AND status='PENDING'
+  `).bind(job_id).first();
+
+  const left = Number(pending?.n || 0);
+  if (left > 0) {
+    // ✅ 次を自分でenqueue（自走）
+    await env.IMPORT_Q.send({ type: "process_rows", job_id });
+  } else {
+    // ✅ 完了
+    await env.RECEIPTS_DB.prepare(`
+      UPDATE receipt_import_job
+      SET status='DONE',
+          next_index=?,
+          processed_rows=?,
+          updated_at=datetime('now')
+      WHERE job_id=?
+    `).bind(total, total, job_id).run();
+  }
+}
 
   const processed_rows = Math.min(total, maxRowIndex);
 
