@@ -1281,35 +1281,6 @@ async function handleProcessRows(env, job_id) {
       WHERE job_id=?
     `).bind(total, total, job_id).run();
   }
-}
-
-  const processed_rows = Math.min(total, maxRowIndex);
-
-  await env.RECEIPTS_DB.prepare(`
-    UPDATE receipt_import_job
-    SET ok_rows=ok_rows+?,
-        ng_rows=ng_rows+?,
-        processed_rows=?,
-        next_index=?,
-        status='RUNNING',
-        updated_at=datetime('now')
-    WHERE job_id=?
-  `).bind(ok, ng, processed_rows, maxRowIndex, job_id).run();
-
-  const pending = await env.RECEIPTS_DB.prepare(`
-    SELECT COUNT(*) AS n FROM receipt_import_row WHERE job_id=? AND status='PENDING'
-  `).bind(job_id).first();
-
-  const left = Number(pending?.n || 0);
-  if (left > 0) {
-    await env.IMPORT_Q.send({ type: "process_rows", job_id });
-  } else {
-    await env.RECEIPTS_DB.prepare(`
-      UPDATE receipt_import_job SET status='DONE', next_index=?, processed_rows=?, updated_at=datetime('now')
-      WHERE job_id=?
-    `).bind(total, total, job_id).run();
-  }
-
 
 
 /* ===================== Member UI HTML ===================== */
