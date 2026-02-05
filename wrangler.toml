@@ -1,40 +1,25 @@
-name = "kamikumite-receipt"
+name = "receipt-sender"
 main = "src/index.js"
-compatibility_date = "2026-01-23"
+compatibility_date = "2025-12-01"
 
-# ======================
-# R2 Bucket
-# ======================
-[[r2_buckets]]
-binding = "RECEIPTS_BUCKET"
-bucket_name = "wdl-receipts"
+# 例: 独自ドメインを使う場合は Cloudflare 側でルーティング設定（後述）
+# routes = [{ pattern = "api.worlddivinelight.org/*", zone_name = "worlddivinelight.org" }]
 
-# ======================
-# KV (OTP)
-# ======================
-[[kv_namespaces]]
-binding = "OTP_KV"
-id = "875836f2f8ce43ae97833286cf2bd035"
-
-# ======================
-# D1 Database
-# ======================
 [[d1_databases]]
 binding = "RECEIPTS_DB"
-database_name = "wdl-receipts-db"
-database_id = "ef4aa4ff-56b4-43f2-b6b5-26bbbab4b568"
+database_name = "receipts"
+database_id = "YOUR_D1_DATABASE_ID"
 
-# ======================
-# Queues (IMPORT)
-# ======================
+[[r2_buckets]]
+binding = "RECEIPTS_BUCKET"
+bucket_name = "YOUR_R2_BUCKET_NAME"
 
-# Producer: API 側から Queue に投げる
-[[queues.producers]]
-binding = "IMPORT_Q"
-queue = "receipt-import-q"
+[vars]
+HUBSPOT_MEMBER_ID_PROPERTY = "member_id"
+FROM_EMAIL = "World Divine Light <receipt@worlddivinelight.org>"
+ADMIN_UI_ORIGIN = "https://admin.mahikari.org"
+RECEIPT_PORTAL_URL = "https://kamikumite.worlddivinelight.org/receipt/"
 
-# Consumer: Worker が Queue を処理する
-[[queues.consumers]]
-queue = "receipt-import-q"
-max_batch_size = 1
-max_batch_timeout = 30
+OTP_TTL_MINUTES = "10"
+SEND_BATCH_SIZE = "50"
+OTP_SALT = "WDL_OTP_SALT_v1_change_me"
